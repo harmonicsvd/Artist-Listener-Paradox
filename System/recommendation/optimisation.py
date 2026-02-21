@@ -39,17 +39,23 @@ def evaluate_user_weights(user_id, config, recommender, train_interactions, k):
         logger.error(f"Error generating recommendations for user {user_id} with recommender {recommender_name}: {str(e)}")
         return None
 
-def evaluate_weights(config, system, recommender, evaluator, train_interactions, test_interactions, tier_weights, eval_users, k):
+def evaluate_weights(config, system, recommender, evaluator, train_interactions, test_interactions, weights_to_apply, eval_users, k, is_hybrid_optimization=False):
     """
-    Evaluate objective loss for a given set of tier weights sequentially.
-    This function is generic for any recommender that uses tier_weights.
+    Evaluate objective loss for a given set of weights sequentially.
+    This function is generic for any recommender that uses tier_weights or hybrid weights.
     Returns objective_loss, metrics, listener_satisfaction, artist_satisfaction, gini_coefficient.
     """
     try:
         system.artist_exposure = {} # Reset exposure for this evaluation run
         
-        # Apply the current set of tier_weights to the recommender
-        recommender.tier_weights = tier_weights
+        # Apply the current set of weights to the recommender
+        if is_hybrid_optimization:
+            recommender.content_weight = weights_to_apply.get('content_weight', 0.5)
+            recommender.mf_weight = weights_to_apply.get('mf_weight', 0.5)
+            logger.debug(f"Applying hybrid weights: Content={recommender.content_weight:.2f}, MF={recommender.mf_weight:.2f}")
+        else:
+            recommender.tier_weights = weights_to_apply
+            logger.debug(f"Applying tier weights: {recommender.tier_weights}")
 
         eval_recs = []
         # Progress bar for generating recs for users is ALWAYS visible (disable=False)
@@ -59,7 +65,7 @@ def evaluate_weights(config, system, recommender, evaluator, train_interactions,
                 eval_recs.append(recs)
 
         if not eval_recs:
-            logger.warning(f"No recommendations generated for k={k} with weights {tier_weights}. Returning a high loss and empty metrics.")
+            logger.warning(f"No recommendations generated for k={k} with weights {weights_to_apply}. Returning a high loss and empty metrics.")
             return float('inf'), {}, 0.0, 0.0, 1.0 # High loss, empty metrics, default exposure values
 
         eval_recs_df = pd.concat(eval_recs, ignore_index=True)
@@ -112,7 +118,7 @@ def evaluate_weights(config, system, recommender, evaluator, train_interactions,
 
     except Exception as e:
         recommender_name = getattr(recommender, 'name', str(type(recommender).__name__))
-        logger.error(f"Error during evaluation of weights {tier_weights} for recommender {recommender_name}: {str(e)}")
+        logger.error(f"Error during evaluation of weights {weights_to_apply} for recommender {recommender_name}: {str(e)}")
         return float('inf'), {}, 0.0, 0.0, 1.0 # Return high loss on error
 
 def optimize_tier_weights(
@@ -128,10 +134,11 @@ def optimize_tier_weights(
     weight_options,
     optimization_method,
     k,
-    n_trials
+    n_trials, # This parameter is now correctly defined here
+    is_hybrid_optimization: bool = False
 ):
     """
-    Optimizes tier weights using Optuna.
+    Optimizes tier weights (or hybrid weights) using Optuna.
     """
     study_name = f"study_{recommender_name}_k{k}"
     # Prepend 'optuna_' to the database file name for consistency with existing files
@@ -140,43 +147,49 @@ def optimize_tier_weights(
 
     # Create TensorBoard writer
     log_dir = os.path.join(config['tensorboard_log_dir'], recommender_name, f"k_{k}")
+    os.makedirs(log_dir, exist_ok=True) # Ensure log directory exists
     writer = tf.summary.create_file_writer(log_dir)
     logger.info(f"TensorBoard logs will be written to: {log_dir}")
 
     best_loss = float('inf')
-    best_weights = config['tier_weights'] # Initialize with default
+    best_weights = {} # Initialize as empty dict, will be populated by Optuna
     best_metrics = {}
 
     def objective(trial: optuna.Trial):
         weights = {}
-        for i, tier in enumerate(tiers):
-            if optimization_method == 'grid':
-                weights[tier] = trial.suggest_categorical(f'w_{tier}', weight_options)
-            else: # bayesian, etc.
-                weights[tier] = trial.suggest_float(f'w_{tier}', 0.01, 1.0) # Broad range, Optuna will refine
+        if is_hybrid_optimization:
+            # For hybrid, optimize content_weight and mf_weight
+            # Ensure they sum to 1 by making one dependent on the other
+            content_weight = trial.suggest_float('content_weight', 0.01, 0.99)
+            mf_weight = 1.0 - content_weight
+            weights = {'content_weight': content_weight, 'mf_weight': mf_weight}
+            logger.debug(f"Trial {trial.number}: Hybrid weights proposed: {weights}")
+        else:
+            # For other recommenders, optimize tier weights
+            for i, tier in enumerate(tiers):
+                if optimization_method == 'grid':
+                    weights[tier] = trial.suggest_categorical(f'w_{tier}', weight_options)
+                else: # bayesian, etc.
+                    weights[tier] = trial.suggest_float(f'w_{tier}', 0.01, 1.0) # Broad range, Optuna will refine
 
-        # Normalize weights to sum to 1
-        total_weight = sum(weights.values())
-        normalized_weights = {tier: w / total_weight for tier, w in weights.items()}
+            # Normalize weights to sum to 1 for non-hybrid tier weights
+            total_weight = sum(weights.values())
+            if total_weight == 0: # Avoid division by zero
+                normalized_weights = {tier: 1.0 / len(weights) for tier in weights}
+            else:
+                normalized_weights = {tier: w / total_weight for tier, w in weights.items()}
+            weights = normalized_weights # Use normalized weights for evaluation
+            logger.debug(f"Trial {trial.number}: Tier weights proposed: {weights}")
         
         # Evaluate these weights using the dedicated evaluation function
         current_loss, current_metrics, ls_score, as_score, gini_score = evaluate_weights(
-            config, system, recommender, evaluator, train_interactions, test_interactions, normalized_weights, eval_users, k
+            config, system, recommender, evaluator, train_interactions, test_interactions, weights, eval_users, k, is_hybrid_optimization
         )
         
         # Log metrics to TensorBoard for this trial
         with writer.as_default():
             tf.summary.scalar("objective_loss", current_loss, step=trial.number)
             
-            # --- Debugging log for Emerging Artist Exposure Index ---
-            # This will print the exact value to your console before logging to TensorBoard
-            if 'Emerging Artist Exposure Index' in current_metrics and k in current_metrics['Emerging Artist Exposure Index']:
-                debug_exposure_index = current_metrics['Emerging Artist Exposure Index'][k]
-                logger.debug(f"Trial {trial.number}, k={k}: Logging Emerging Artist Exposure Index = {debug_exposure_index:.4f}")
-            else:
-                logger.debug(f"Trial {trial.number}, k={k}: Emerging Artist Exposure Index NOT found in current_metrics or for k. Value will be 0 in TensorBoard if this path is taken.")
-            # --- End Debugging log ---
-
             for metric_name, values in current_metrics.items():
                 # Ensure the metric exists for the current k-value before logging
                 if k in values:
@@ -184,10 +197,10 @@ def optimize_tier_weights(
             tf.summary.scalar("metrics/listener_satisfaction", ls_score, step=trial.number)
             tf.summary.scalar("metrics/artist_satisfaction", as_score, step=trial.number)
             tf.summary.scalar("metrics/gini_coefficient", gini_score, step=trial.number)
-            tf.summary.text("trial_weights", str(normalized_weights), step=trial.number) # Renamed to avoid confusion
+            tf.summary.text("trial_weights", str(weights), step=trial.number) # Renamed to avoid confusion
 
         # Store best weights for this trial as user attribute
-        trial.set_user_attr('best_weights_for_trial', normalized_weights)
+        trial.set_user_attr('best_weights_for_trial', weights)
         trial.set_user_attr('best_metrics_for_trial', current_metrics)
         trial.set_user_attr('ls_for_trial', ls_score)
         trial.set_user_attr('as_for_trial', as_score)
@@ -224,17 +237,24 @@ def optimize_tier_weights(
             if study.best_trial:
                 best_trial_so_far = study.best_trial
                 current_best_loss = best_trial_so_far.value
-                # Ensure the user_attrs are accessed safely and formatted for display
-                best_weights_for_display = {
-                    tier: f"{best_trial_so_far.user_attrs.get('best_weights_for_trial', {}).get(tier, 0.0):.2f}"
-                    for tier in tiers # Use the 'tiers' list to ensure consistent order/keys
-                }
+                
+                # Get the weights for display based on whether it's hybrid optimization
+                weights_for_display = {}
+                if is_hybrid_optimization:
+                    weights_for_display['content_weight'] = f"{best_trial_so_far.user_attrs.get('best_weights_for_trial', {}).get('content_weight', 0.0):.2f}"
+                    weights_for_display['mf_weight'] = f"{best_trial_so_far.user_attrs.get('best_weights_for_trial', {}).get('mf_weight', 0.0):.2f}"
+                else:
+                    weights_for_display = {
+                        tier: f"{best_trial_so_far.user_attrs.get('best_weights_for_trial', {}).get(tier, 0.0):.2f}"
+                        for tier in tiers # Use the 'tiers' list to ensure consistent order/keys
+                    }
+                
                 # Update progress bar description to show trial number out of total, and best loss
-                pbar.set_description(f"Optimizing {recommender_name} (k={k}) | Trial {i+1}/{n_trials} | Best Loss: {current_best_loss:.4f} | Weights: {best_weights_for_display}")
+                pbar.set_description(f"Optimizing {recommender_name} (k={k}) | Trial {i+1}/{n_trials} | Best Loss: {current_best_loss:.4f} | Weights: {weights_for_display}")
 
                 # Log the best weights found so far to TensorBoard
                 with writer.as_default():
-                    tf.summary.text("best_weights_so_far", str(best_weights_for_display), step=i+1)
+                    tf.summary.text("best_weights_so_far", str(weights_for_display), step=i+1)
                     writer.flush() # Ensure logs are written to disk immediately
 
             pbar.update(1)

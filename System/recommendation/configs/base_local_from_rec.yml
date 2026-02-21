@@ -1,0 +1,59 @@
+data_path: "../data"
+
+optuna_db_path: "../models"
+
+saved_data_dir: "../SavedData2"
+
+cache_dir: "../SavedData/cache"
+
+tensorboard_log_dir: "../TensorBoardLogs"
+
+load_saved_data: true
+
+run_optimization: false
+
+load_optimized_weights: true
+
+max_users: 400
+
+min_interactions: 6
+
+verbose: false
+
+# Recommendation parameters
+
+k_values: [5]
+
+n_recs: 5
+
+tier_weights:
+  emerging_new: 0.158
+  emerging_trending: 0.211
+  rising_established: 0.158
+  mid_tier: 0.105
+  established: 0.158
+  established_trending: 0.105
+  established_legacy: 0.105
+
+# Optimisation settings
+
+optimization_method: bayesian
+
+weight_options: [0.1, 0.15, 0.2]
+
+n_trials: 200
+
+# Loss calculators configuration - simple dicts instead of Python objects
+
+loss_calculators:
+  ContentBased:
+    recommender_name: ContentBased
+
+  CollaborativeFiltering:
+    recommender_name: CollaborativeFiltering
+
+  MatrixFactorization:
+    recommender_name: MatrixFactorization
+
+  HybridContentMF:
+    recommender_name: HybridContentMF

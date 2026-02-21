@@ -9,7 +9,7 @@ import os
 import pickle
 
 from System.recommendation.base import RecommenderBase
-from System.recommendation.utils.weights import calculate_item_weights, calculate_language_weights, calculate_genre_weights
+from System.recommendation.utils.weights import calculate_item_weights, calculate_genre_weights # Removed calculate_language_weights
 from System.recommendation.utils.mappings import create_song_to_tier_mapping, create_genre_mapping, create_language_mapping, create_artist_metric_mappings, compute_related_genres
 from tqdm import tqdm
 
@@ -22,8 +22,8 @@ class MatrixFactorizationRecommender(RecommenderBase):
         self,
         tier_weights: Dict[str, float],
         name: str = "MatrixFactorization",
-        n_factors: int = 50,
-        mf_component_weight: float = 1.0,
+        n_factors: int = 100,
+        mf_component_weight: float = 3.8,
         item_weight_component_weight: float = 1.5,
         song_to_tier: Optional[Dict[str, str]] = None,
         song_to_pop: Optional[Dict[str, float]] = None,
@@ -66,8 +66,8 @@ class MatrixFactorizationRecommender(RecommenderBase):
 
     def _build_all_user_profiles_for_mf(self, user_interactions: pd.DataFrame) -> Dict[str, Dict]:
         """
-        Builds user profiles (language/genre weights, listened items) for all users
-        during MF training.
+        Builds user profiles (genre weights, listened items) for all users
+        during MF training. Language weights are no longer calculated here.
         """
         all_user_profiles = {}
         unique_users = user_interactions['user_id'].unique()
@@ -84,13 +84,14 @@ class MatrixFactorizationRecommender(RecommenderBase):
             play_counts_listened = user_items.get('play_count', pd.Series([1.0] * len(item_ids_listened))).tolist()
 
             # Ensure essential mappings are available before calculating weights
-            if not all([self.song_to_language, self.song_to_genres, self.related_genres_map]):
-                logger.warning(f"Essential mappings not fully initialized for user {user_id} profile. Skipping weight calculation for this user.")
+            # Removed self.song_to_language from this check as language is handled by filtering
+            if not all([self.song_to_genres, self.related_genres_map]): 
+                logger.warning(f"Essential mappings not fully initialized for user {user_id} profile. Skipping genre weight calculation for this user.")
                 # Create a basic profile without weights if mappings are missing
-                all_user_profiles[user_id] = {'listened_items': set(item_ids_listened), 'language_weights': {}, 'genre_weights': {}}
+                all_user_profiles[user_id] = {'listened_items': set(item_ids_listened), 'genre_weights': {}}
                 continue
 
-            language_weights = calculate_language_weights(item_ids_listened, play_counts_listened, self.song_to_language)
+            # language_weights removed from calculation and storage
             genre_weights = calculate_genre_weights(item_ids_listened, play_counts_listened, self.song_to_genres)
             
             user_genres = {genre for item_id in item_ids_listened for genre in self.song_to_genres.get(item_id, [])}
@@ -98,7 +99,6 @@ class MatrixFactorizationRecommender(RecommenderBase):
             extended_genres = user_genres.union(related_genres)
             
             all_user_profiles[user_id] = {
-                'language_weights': language_weights,
                 'genre_weights': genre_weights,
                 'listened_items': set(item_ids_listened)
             }
@@ -131,9 +131,14 @@ class MatrixFactorizationRecommender(RecommenderBase):
                 logger.info("Computed related genres for %d genres", len(self.related_genres_map))
             elif self.related_genres_map is None:
                 logger.warning("Cannot compute related_genres_map: song_to_genres is not set.")
-        
+            
+            # Ensure song_to_language is populated during train
+            if self.song_to_language is None and 'language' in song_metadata.columns:
+                self.song_to_language = dict(zip(song_metadata['song_id'], song_metadata['language']))
+
+        # Removed self.song_to_language from this check as language is handled by filtering
         if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, 
-                    self.song_to_genres, self.song_to_language, self.related_genres_map, self.tier_weights]):
+                    self.song_to_genres, self.related_genres_map, self.tier_weights]):
             logger.error("MatrixFactorization requires essential mappings; missing mappings may cause recommendation errors.")
 
         actual_num_users = user_interactions['user_id'].nunique()
@@ -251,11 +256,12 @@ class MatrixFactorizationRecommender(RecommenderBase):
                 item_ids = user_items['song_id'].tolist()
                 play_counts = user_items.get('play_count', pd.Series([1.0] * len(item_ids))).tolist()
                 
-                if not all([self.song_to_language, self.song_to_genres, self.related_genres_map]):
+                # Removed self.song_to_language from this check as language is handled by filtering
+                if not all([self.song_to_genres, self.related_genres_map]): 
                     logger.error("Required mappings not initialized for user profile creation in MF recommend (on-the-fly). Cannot build profile.")
                     return None
 
-                language_weights = calculate_language_weights(item_ids, play_counts, self.song_to_language)
+                # language_weights removed from calculation and storage
                 genre_weights = calculate_genre_weights(item_ids, play_counts, self.song_to_genres)
                 
                 user_genres = {genre for item_id in item_ids for genre in self.song_to_genres.get(item_id, [])}
@@ -263,7 +269,6 @@ class MatrixFactorizationRecommender(RecommenderBase):
                 extended_genres = user_genres.union(related_genres)
 
                 user_profile = {
-                    'language_weights': language_weights,
                     'genre_weights': genre_weights,
                     'listened_items': set(item_ids)
                 }
@@ -305,35 +310,80 @@ class MatrixFactorizationRecommender(RecommenderBase):
         if raw_mf_scores.ndim > 1:
             raw_mf_scores = raw_mf_scores.flatten()
 
-        if raw_mf_scores.size > 0:
-            self.mf_score_scaler.fit(raw_mf_scores.reshape(-1, 1))
-            normalized_mf_scores = self.mf_score_scaler.transform(raw_mf_scores.reshape(-1, 1)).flatten()
-        else:
-            normalized_mf_scores = np.zeros_like(raw_mf_scores)
-
         user_profile = self._get_user_profile_for_recommendation(user_id, user_interactions, testing_mode)
         if not user_profile: # if profile is None after lookup/on-the-fly attempt
             logger.warning(f"No user profile found or built for user {user_id} for item weighting; using only MF scores.")
             # Provide a minimal default profile to avoid further errors in calculations
-            user_profile = {'genre_weights': {}, 'language_weights': {}, 'listened_items': set()} 
+            user_profile = {'genre_weights': {}, 'listened_items': set()} # Removed language_weights
 
-        # Initialize final scores array with MF scores
+        # Determine dominant language(s) from user's listening history
+        user_listened_items = user_profile['listened_items']
+        dominant_languages = []
+        if user_listened_items and self.song_to_language:
+            listened_languages = [self.song_to_language.get(song_id) for song_id in user_listened_items if self.song_to_language.get(song_id)]
+            if listened_languages:
+                language_counts = pd.Series(listened_languages).value_counts()
+                max_count = language_counts.max()
+                dominant_languages = language_counts[language_counts == max_count].index.tolist()
+                if testing_mode:
+                    logger.info(f"User {user_id} dominant language(s): {dominant_languages}")
+            else:
+                logger.debug(f"No language information found for listened songs of user {user_id}.")
+        else:
+            logger.debug(f"No listened items or song_to_language mapping for user {user_id}.")
+
+        # Prepare a list of candidate song_ids and their original indices
+        candidate_song_ids = []
+        candidate_original_indices = []
+
+        if dominant_languages:
+            for i in range(len(self.index_to_song_id)):
+                song_id = self.index_to_song_id[i]
+                if self.song_to_language and self.song_to_language.get(song_id) in dominant_languages:
+                    candidate_song_ids.append(song_id)
+                    candidate_original_indices.append(i)
+            
+            if not candidate_song_ids: # Fallback if no songs match dominant language
+                logger.warning(f"No songs found matching dominant language(s) {dominant_languages}. Reverting to all songs for recommendation calculation.")
+                candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+                candidate_original_indices = list(range(len(self.index_to_song_id)))
+        else:
+            # If no dominant language found, consider all songs
+            candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+            candidate_original_indices = list(range(len(self.index_to_song_id)))
+
+        # Extract MF scores only for the candidate songs
+        mf_scores_for_candidates = raw_mf_scores[candidate_original_indices]
+
+        # Handle cases where mf_scores_for_candidates might be uniform or empty
+        if mf_scores_for_candidates.size == 0 or (mf_scores_for_candidates.max() - mf_scores_for_candidates.min()) < 1e-10:
+            logger.warning(f"MF scores for user {user_id} (filtered by language) are uniform or empty. Setting normalized scores to 0.5.")
+            normalized_mf_scores = np.full_like(mf_scores_for_candidates, 0.5) # Assign a neutral score
+            # If no candidates, return empty DataFrame
+            if mf_scores_for_candidates.size == 0:
+                return pd.DataFrame(columns=['user_id', 'song_id', 'score'])
+        else:
+            # Normalize MF scores for candidates
+            self.mf_score_scaler.fit(mf_scores_for_candidates.reshape(-1, 1))
+            normalized_mf_scores = self.mf_score_scaler.transform(mf_scores_for_candidates.reshape(-1, 1)).flatten()
+
         hybrid_scores_final_values = np.copy(normalized_mf_scores)
-        item_weights_list = [0.0] * len(self.index_to_song_id) # Initialize with zeros for all songs
+        item_weights_list = [0.0] * len(candidate_song_ids) # Initialize with zeros for candidate songs
 
         listened_songs_indices = {self.song_id_to_index[sid] for sid in user_profile['listened_items'] if sid in self.song_id_to_index}
 
-        for idx in range(len(self.index_to_song_id)):
-            song_id = self.index_to_song_id[idx]
+        for idx_in_candidate, song_id in enumerate(candidate_song_ids):
+            original_idx = self.song_id_to_index[song_id] # Get original index for exclusion check
             
             # Apply exclusion directly by setting score to -1.0
-            if exclude_listened and idx in listened_songs_indices:
-                hybrid_scores_final_values[idx] = -1.0 # Mark as excluded
-                item_weights_list[idx] = 0.0 # Set dummy weight for excluded item
+            if exclude_listened and original_idx in listened_songs_indices:
+                hybrid_scores_final_values[idx_in_candidate] = -1.0 # Mark as excluded
+                item_weights_list[idx_in_candidate] = 0.0 # Set dummy weight for excluded item
                 continue
             
             # Ensure required mappings for item weight calculation are present.
-            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.song_to_language, self.tier_weights]):
+            # Removed self.song_to_language from this check as language is handled by filtering
+            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.tier_weights]): 
                 logger.warning(f"Required mappings not initialized for item weight calculation for song {song_id} in MF recommend. Skipping item weighting.")
                 item_weight = 0.5 # Default neutral weight
             else:
@@ -344,11 +394,10 @@ class MatrixFactorizationRecommender(RecommenderBase):
                     self.song_to_fam,
                     user_profile['genre_weights'],
                     self.song_to_genres,
-                    self.song_to_language,
-                    user_profile['language_weights'],
+                    None, None, # Language weights are no longer passed here
                     self.tier_weights
                 )
-            item_weights_list[idx] = item_weight # Assign calculated item weight
+            item_weights_list[idx_in_candidate] = item_weight # Assign calculated item weight
 
         # Handle scaling for item_weights_list
         # Only fit scaler on non-negative weights from items that are not excluded
@@ -362,15 +411,15 @@ class MatrixFactorizationRecommender(RecommenderBase):
             normalized_item_weights = np.zeros_like(item_weights_list)
 
         # Combine the scores only for non-excluded items in a second loop
-        for idx in range(len(self.index_to_song_id)):
-            if hybrid_scores_final_values[idx] == -1.0: # If item was marked for exclusion, skip it
+        for idx_in_candidate in range(len(candidate_song_ids)):
+            if hybrid_scores_final_values[idx_in_candidate] == -1.0: # If item was marked for exclusion, skip it
                 continue
             
             final_score = (
-                normalized_mf_scores[idx] * self.mf_component_weight +
-                normalized_item_weights[idx] * self.item_weight_component_weight
+                normalized_mf_scores[idx_in_candidate] * self.mf_component_weight +
+                normalized_item_weights[idx_in_candidate] * self.item_weight_component_weight
             )
-            hybrid_scores_final_values[idx] = final_score
+            hybrid_scores_final_values[idx_in_candidate] = final_score
 
         hybrid_scores = hybrid_scores_final_values # Assign the final computed scores
         
@@ -381,22 +430,27 @@ class MatrixFactorizationRecommender(RecommenderBase):
             logger.warning(f"Final scores for user {user_id} are uniform or empty after exclusion. Cannot normalize meaningfully. Returning empty recommendations.")
             return pd.DataFrame(columns=['user_id', 'song_id', 'score'])
         
-        hybrid_scores[valid_scores_mask] = (valid_scores - valid_scores.min()) / (valid_scores.max() - valid_scores.min() + 1e-10)
+        # Ensure normalization only happens if there's a range to normalize over
+        if valid_scores.max() - valid_scores.min() > 1e-10:
+            hybrid_scores[valid_scores_mask] = (valid_scores - valid_scores.min()) / (valid_scores.max() - valid_scores.min() + 1e-10)
+        else:
+            # If all valid scores are identical, set them to a neutral value (e.g., 0.5)
+            hybrid_scores[valid_scores_mask] = 0.5
         
-        ranked_song_indices = np.argsort(-hybrid_scores)
+        ranked_song_indices_in_scores = np.argsort(-hybrid_scores) # These are indices within the `hybrid_scores` array (which corresponds to `candidate_song_ids`)
         
         top_n_songs_info = []
         top_candidate_count = max(n * 5, 20)
 
-        for i in ranked_song_indices:
-            song_id = self.index_to_song_id[i]
-            if hybrid_scores[i] < 0:
+        for i_in_scores in ranked_song_indices_in_scores:
+            song_id = candidate_song_ids[i_in_scores] # Get actual song_id from the candidate list
+            if hybrid_scores[i_in_scores] < 0:
                 continue
             
             top_n_songs_info.append({
                 'user_id': user_id,
                 'song_id': song_id,
-                'score': hybrid_scores[i]
+                'score': hybrid_scores[i_in_scores]
             })
             if len(top_n_songs_info) >= top_candidate_count:
                 break
@@ -492,12 +546,6 @@ class MatrixFactorizationRecommender(RecommenderBase):
         )
         item_similarities = item_similarities.flatten()
 
-        if item_similarities.size > 0:
-            self.mf_score_scaler.fit(item_similarities.reshape(-1, 1))
-            normalized_mf_similarities = self.mf_score_scaler.transform(item_similarities.reshape(-1, 1)).flatten()
-        else:
-            normalized_mf_similarities = np.zeros_like(item_similarities)
-
         user_profile = None
         extended_genres = set()
         
@@ -510,7 +558,7 @@ class MatrixFactorizationRecommender(RecommenderBase):
         
         # If no user profile found (either no user_id or not in cache), create a default one
         if not user_profile:
-            user_profile = {'genre_weights': {}, 'language_weights': {}, 'listened_items': set()}
+            user_profile = {'genre_weights': {}, 'listened_items': set()} # Removed language_weights
             # If no user, base extended_genres on the seed item for genre boost
             if not extended_genres: # Only if extended_genres wasn't set by a user profile
                 seed_genres = set(self.song_to_genres.get(seed_item_id, []))
@@ -520,20 +568,77 @@ class MatrixFactorizationRecommender(RecommenderBase):
                 if testing_mode:
                     logger.debug(f"No user profile, basing extended genres on seed {seed_item_id}; extended genres size: {len(extended_genres)}")
 
+        # Determine target language(s) for similar items
+        target_languages = []
+        user_listened_items = set()
+
+        if user_id and self.song_to_language:
+            # Get user's listened items to determine dominant language
+            if user_profile and 'listened_items' in user_profile:
+                user_listened_items = user_profile['listened_items']
+            
+            if user_listened_items:
+                listened_languages = [self.song_to_language.get(song_id) for song_id in user_listened_items if self.song_to_language.get(song_id)]
+                if listened_languages:
+                    language_counts = pd.Series(listened_languages).value_counts()
+                    max_count = language_counts.max()
+                    target_languages = language_counts[language_counts == max_count].index.tolist()
+                    if testing_mode:
+                        logger.info(f"User {user_id} dominant language(s) for similar items: {target_languages}")
+        
+        if not target_languages and self.song_to_language: # If no user or no dominant user language, use seed item's language
+            seed_language = self.song_to_language.get(seed_item_id)
+            if seed_language:
+                target_languages = [seed_language]
+                if testing_mode:
+                    logger.info(f"Using seed item's language {seed_language} for similar items.")
+            else:
+                logger.warning(f"No language found for seed item {seed_item_id}. Similar items will not be language filtered.")
+        
+        # Prepare a list of candidate song_ids and their original indices
+        candidate_song_ids = []
+        candidate_original_indices = []
+
+        if target_languages:
+            for i in range(len(self.index_to_song_id)):
+                song_id = self.index_to_song_id[i]
+                if self.song_to_language and self.song_to_language.get(song_id) in target_languages:
+                    candidate_song_ids.append(song_id)
+                    candidate_original_indices.append(i)
+            if not candidate_song_ids:
+                logger.warning(f"No similar items found matching target language(s) {target_languages}. Reverting to all songs for similarity calculation.")
+                candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+                candidate_original_indices = list(range(len(self.index_to_song_id)))
+        else:
+            candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+            candidate_original_indices = list(range(len(self.index_to_song_id)))
+
+        # Extract similarities only for the candidate songs
+        item_similarities_for_candidates = item_similarities[candidate_original_indices] # Use the already calculated item_similarities (all)
+
+        # Handle cases where item_similarities_for_candidates might be uniform or empty
+        if item_similarities_for_candidates.size == 0 or (item_similarities_for_candidates.max() - item_similarities_for_candidates.min()) < 1e-10:
+            logger.warning(f"MF similarities for seed {seed_item_id} (filtered by language) are uniform or empty. Setting normalized similarities to 0.5.")
+            normalized_mf_similarities = np.full_like(item_similarities_for_candidates, 0.5) # Assign a neutral similarity
+            # If no candidates, return empty DataFrame
+            if item_similarities_for_candidates.size == 0:
+                return pd.DataFrame(columns=['seed_item_id', 'song_id', 'score'])
+        else:
+            self.mf_score_scaler.fit(item_similarities_for_candidates.reshape(-1, 1))
+            normalized_mf_similarities = self.mf_score_scaler.transform(item_similarities_for_candidates.reshape(-1, 1)).flatten()
 
         hybrid_scores_initial = np.copy(normalized_mf_similarities) # Initialize
-        item_weights_list = [0.0] * len(self.index_to_song_id) # Initialize for all songs
+        item_weights_list = [0.0] * len(candidate_song_ids) # Initialize for candidate songs
         
-        for idx in range(len(self.index_to_song_id)):
-            song_id = self.index_to_song_id[idx]
-            
+        for idx_in_candidate, song_id in enumerate(candidate_song_ids):
             if exclude_seed and song_id == seed_item_id:
-                hybrid_scores_initial[idx] = -1.0 # Mark as excluded
-                item_weights_list[idx] = 0.0 # Dummy weight for excluded item
+                hybrid_scores_initial[idx_in_candidate] = -1.0 # Mark as excluded
+                item_weights_list[idx_in_candidate] = 0.0 # Dummy weight for excluded item
                 continue
             
             # Ensure required mappings for item weight calculation are present.
-            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.song_to_language, self.tier_weights]):
+            # Removed self.song_to_language from this check as language is handled by filtering
+            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.tier_weights]): 
                 logger.warning(f"Required mappings not initialized for item weight calculation for song {song_id} in MF similar items. Skipping item weighting.")
                 item_weight = 0.5 # Default neutral weight
             else:
@@ -550,15 +655,14 @@ class MatrixFactorizationRecommender(RecommenderBase):
                     self.song_to_fam,
                     user_profile['genre_weights'],
                     self.song_to_genres,
-                    self.song_to_language,
-                    user_profile['language_weights'],
+                    None, None, # Language weights are no longer passed here
                     self.tier_weights
                 ) 
                 
                 # Apply additional boost based on genre match
                 item_weight *= (1 + genre_match_boost * 0.5) # Example: 50% boost if genre matches
 
-            item_weights_list[idx] = item_weight # Assign calculated item weight
+            item_weights_list[idx_in_candidate] = item_weight # Assign calculated item weight
 
         valid_item_weights = [w for i, w in enumerate(item_weights_list) if hybrid_scores_initial[i] >= 0]
         if valid_item_weights and (max(valid_item_weights) - min(valid_item_weights)) > 1e-10:
@@ -569,15 +673,15 @@ class MatrixFactorizationRecommender(RecommenderBase):
 
         hybrid_scores_final_values = np.copy(hybrid_scores_initial) # Start with current state (incl. exclusions)
 
-        for idx in range(len(self.index_to_song_id)):
-            if hybrid_scores_final_values[idx] == -1.0: # If excluded, skip
+        for idx_in_candidate in range(len(candidate_song_ids)):
+            if hybrid_scores_final_values[idx_in_candidate] == -1.0: # If excluded, skip
                 continue
             
             final_score = (
-                normalized_mf_similarities[idx] * self.mf_component_weight +
-                normalized_item_weights[idx] * self.item_weight_component_weight
+                normalized_mf_similarities[idx_in_candidate] * self.mf_component_weight +
+                normalized_item_weights[idx_in_candidate] * self.item_weight_component_weight
             )
-            hybrid_scores_final_values[idx] = final_score
+            hybrid_scores_final_values[idx_in_candidate] = final_score
             
         hybrid_scores = hybrid_scores_final_values
         
@@ -588,22 +692,27 @@ class MatrixFactorizationRecommender(RecommenderBase):
             logger.warning(f"Final scores for seed {seed_item_id} are uniform or empty after exclusion. Cannot normalize meaningfully. Returning empty recommendations.")
             return pd.DataFrame(columns=['seed_item_id', 'song_id', 'score']) 
         
-        hybrid_scores[valid_scores_mask] = (valid_scores - valid_scores.min()) / (valid_scores.max() - valid_scores.min() + 1e-10)
+        # Ensure normalization only happens if there's a range to normalize over
+        if valid_scores.max() - valid_scores.min() > 1e-10:
+            hybrid_scores[valid_scores_mask] = (valid_scores - valid_scores.min()) / (valid_scores.max() - valid_scores.min() + 1e-10)
+        else:
+            # If all valid scores are identical, set them to a neutral value (e.g., 0.5)
+            hybrid_scores[valid_scores_mask] = 0.5
         
-        ranked_song_indices = np.argsort(-hybrid_scores)
+        ranked_song_indices_in_scores = np.argsort(-hybrid_scores)
         
         top_n_songs_info = []
         top_candidate_count = max(n * 5, 20)
 
-        for i in ranked_song_indices:
-            song_id = self.index_to_song_id[i]
-            if hybrid_scores[i] < 0:
+        for i_in_scores in ranked_song_indices_in_scores:
+            song_id = candidate_song_ids[i_in_scores] # Get actual song_id from the candidate list
+            if hybrid_scores[i_in_scores] < 0:
                 continue
             
             top_n_songs_info.append({
                 'seed_item_id': seed_item_id,
                 'song_id': song_id,
-                'score': hybrid_scores[i]
+                'score': hybrid_scores[i_in_scores]
             })
             if len(top_n_songs_info) >= top_candidate_count:
                 break

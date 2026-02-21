@@ -26,7 +26,7 @@ def evaluate_recommendations(
         'Coverage (%)': {}, 'Diversity': {}, 'Novelty': {}, 'Emerging Artist Exposure Index': {}
     }
     
-    # Initialize mappings
+    # Initialize mappings for recommended songs metadata
     id_col = next((col for col in song_metadata.columns if col in ['song_id', 'track_id', 'id']), song_metadata.columns[0])
     song_to_genre = dict(zip(song_metadata[id_col], song_metadata.get('top_genre', pd.Series(index=song_metadata[id_col], dtype=str))))
     song_to_language = dict(zip(song_metadata[id_col], song_metadata.get('language', pd.Series(index=song_metadata[id_col], dtype=str))))
@@ -38,34 +38,31 @@ def evaluate_recommendations(
     ).reset_index()
     test_by_user = test_interactions.groupby('user_id')['song_id'].apply(set).to_dict()
     
-    # Prepare metadata merge, prioritizing test_interactions columns
-    metadata_columns = [id_col]
-    if 'top_genre' in song_metadata.columns and 'top_genre' not in test_interactions.columns:
-        metadata_columns.append('top_genre')
-    
+    # --- REVISED MERGE AND COLUMN HANDLING FOR test_interactions_with_metadata ---
+    # Merge test_interactions with ALL of song_metadata, then select/handle columns
     test_interactions_with_metadata = test_interactions.merge(
-        song_metadata[metadata_columns],
-        left_on='song_id', right_on=id_col, how='left'
+        song_metadata,
+        left_on='song_id', right_on=id_col, how='left', suffixes=('', '_meta')
     )
     
-    # Handle language
-    if 'language' in test_interactions.columns:
-        test_languages_by_user = test_interactions_with_metadata.groupby('user_id')['language'].apply(set).to_dict()
-    elif 'language' in song_metadata.columns:
-        test_interactions_with_metadata = test_interactions_with_metadata.merge(
-            song_metadata[[id_col, 'language']], left_on='song_id', right_on=id_col, how='left', suffixes=('', '_meta')
-        )
-        test_languages_by_user = test_interactions_with_metadata.groupby('user_id')['language'].apply(set).to_dict()
+    # Ensure 'top_genre' and 'language' columns exist and fill NaNs
+    if 'top_genre' not in test_interactions_with_metadata.columns:
+        test_interactions_with_metadata['top_genre'] = 'unknown_genre'
+        logger.warning("Added missing 'top_genre' column to test_interactions_with_metadata with 'unknown_genre'.")
     else:
-        logger.warning("No 'language' in test_interactions or song_metadata; Language Precision will be 0")
-        test_languages_by_user = {user_id: set() for user_id in test_by_user}
-    
-    # Handle top_genre
-    if 'top_genre' in test_interactions.columns:
-        test_genres_by_user = test_interactions_with_metadata.groupby('user_id')['top_genre'].apply(set).to_dict()
+        test_interactions_with_metadata['top_genre'] = test_interactions_with_metadata['top_genre'].fillna('unknown_genre')
+
+    if 'language' not in test_interactions_with_metadata.columns:
+        test_interactions_with_metadata['language'] = 'unknown_language'
+        logger.warning("Added missing 'language' column to test_interactions_with_metadata with 'unknown_language'.")
     else:
-        test_genres_by_user = test_interactions_with_metadata.groupby('user_id')['top_genre'].apply(set).to_dict()
-    
+        test_interactions_with_metadata['language'] = test_interactions_with_metadata['language'].fillna('unknown_language')
+    # --- END REVISED MERGE AND COLUMN HANDLING ---
+
+    # Get user's relevant genres and languages from test interactions
+    test_genres_by_user = test_interactions_with_metadata.groupby('user_id')['top_genre'].apply(lambda x: set(x.dropna())).to_dict()
+    test_languages_by_user = test_interactions_with_metadata.groupby('user_id')['language'].apply(lambda x: set(x.dropna())).to_dict()
+
     # Calculate emerging artist proportions in catalog
     emerging_tiers = ['emerging_new', 'emerging_trending']
     total_songs = len(song_metadata)
@@ -90,7 +87,7 @@ def evaluate_recommendations(
             rec_songs = user_recs['song_id'].tolist()
             relevant_items = test_by_user.get(user_id, set())
             if not relevant_items:
-                continue
+                continue # Cannot calculate metrics if no relevant items in test set
                 
             # Update coverage and emerging artist count
             unique_recs.update(rec_songs)
@@ -103,19 +100,26 @@ def evaluate_recommendations(
             precision = hits_count / k if k > 0 else 0.0
             precisions.append(precision)
             
-            # Genre Precision
-            rec_genres = {song_to_genre.get(song, '') for song in rec_songs}
-            test_genres = test_genres_by_user.get(user_id, set())
-            genre_hits = len(rec_genres & test_genres)
-            genre_precision = genre_hits / k if k > 0 else 0.0
+            # --- MODIFICATION FOR PER-SONG GENRE/LANGUAGE PRECISION ---
+            user_relevant_genres_set = test_genres_by_user.get(user_id, set())
+            user_relevant_languages_set = test_languages_by_user.get(user_id, set())
+
+            genre_hits_per_song = 0
+            for song_id in rec_songs:
+                song_genre = song_to_genre.get(song_id, '')
+                if song_genre and song_genre != 'unknown_genre' and song_genre in user_relevant_genres_set:
+                    genre_hits_per_song += 1
+            genre_precision = genre_hits_per_song / k if k > 0 else 0.0
             genre_precisions.append(genre_precision)
             
-            # Language Precision
-            rec_languages = {song_to_language.get(song, '') for song in rec_songs}
-            test_languages = test_languages_by_user.get(user_id, set())
-            language_hits = len(rec_languages & test_languages)
-            language_precision = language_hits / k if k > 0 else 0.0
+            language_hits_per_song = 0
+            for song_id in rec_songs:
+                song_language = song_to_language.get(song_id, '')
+                if song_language and song_language != 'unknown_language' and song_language in user_relevant_languages_set:
+                    language_hits_per_song += 1
+            language_precision = language_hits_per_song / k if k > 0 else 0.0
             language_precisions.append(language_precision)
+            # --- END OF MODIFICATION ---
             
             # Recall
             recall = hits_count / len(relevant_items) if len(relevant_items) > 0 else 0.0
@@ -151,7 +155,8 @@ def evaluate_recommendations(
             # Novelty
             tier_weights = {
                 'emerging_new': 1.0, 'emerging_trending': 0.8,
-                'rising_established': 0.6, 'mid_tier': 0.4, 'established': 0.2,'established_trending': 0.2,'established_legacy': 0.2
+                'rising_established': 0.6, 'mid_tier': 0.4, 'established': 0.2,
+                'established_trending': 0.2, 'established_legacy': 0.2
             }
             
             novelty_scores = [
@@ -191,7 +196,6 @@ class RecommendationEvaluator:
         self.item_ids = item_ids
         self.song_metadata = song_metadata
         self.k_values = k_values
-        print(self.k_values)
         if not item_ids or len(item_features.shape) < 1 or len(item_ids) != item_features.shape[0]:
             raise ValueError("item_ids must match item_features dimensions")
         if song_metadata.empty:
@@ -210,3 +214,4 @@ class RecommendationEvaluator:
             song_metadata=self.song_metadata,
             k_values=self.k_values
         )
+

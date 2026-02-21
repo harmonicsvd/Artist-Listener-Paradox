@@ -19,6 +19,7 @@ from System.recommendation.recommendation_system import RecommendationSystem
 from System.recommendation.content_based import ContentBasedRecommender
 from System.recommendation.collaborative_filtering import CollaborativeFilteringRecommender
 from System.recommendation.matrix_factorization import MatrixFactorizationRecommender
+from System.recommendation.hybrid_recommender import HybridRecommender
 from System.recommendation.evaluation import RecommendationEvaluator
 from System.recommendation.cf_evaluation import CFRecommendationEvaluator
 from System.recommendation.utils.display import print_recommendation_details
@@ -26,7 +27,7 @@ from System.recommendation.utils.mappings import create_genre_mapping, create_so
 from System.recommendation.objective_loss import ObjectiveLossCalculator
 from System.recommendation.utils.recommendation_analysis import compare_recommendation_approaches
 from System.recommendation.utils.user_analysis import analyze_user_listening_history
-from optimisation import optimize_tier_weights # Ensure this is correctly imported
+from optimisation import optimize_tier_weights
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,7 +48,6 @@ def load_optuna_weights(db_path, study_name):
 
 def split_data(interactions, song_metadata, test_size=0.5, random_state=42, min_interactions=6, max_users=None, load_saved_data=False, saved_data_dir=None):
     """Split interactions into train and test sets by user, ensuring min_interactions and focused genres/languages if possible."""
-    # Define file paths for saving/loading splits
     if saved_data_dir and max_users:
         train_split_path = os.path.join(saved_data_dir, f"train_interactions_u{max_users}.csv")
         test_split_path = os.path.join(saved_data_dir, f"test_interactions_u{max_users}.csv")
@@ -55,7 +55,6 @@ def split_data(interactions, song_metadata, test_size=0.5, random_state=42, min_
         train_split_path = None
         test_split_path = None
 
-    # Load saved splits if load_saved_data is True and files exist
     if load_saved_data and train_split_path and test_split_path and os.path.exists(train_split_path) and os.path.exists(test_split_path):
         logger.info(f"Loading saved data splits for {max_users} users from {saved_data_dir}")
         train_interactions = pd.read_csv(train_split_path)
@@ -71,7 +70,6 @@ def split_data(interactions, song_metadata, test_size=0.5, random_state=42, min_
     logger.info(f"Total users: {len(user_counts)}, Users with >={min_interactions} interactions: {len(valid_users_initial)}")
     logger.info(f"Columns in interactions: {list(filtered_interactions.columns)}")
 
-    # Identify genre column
     genre_column = 'top_genre'
     if genre_column not in song_metadata.columns:
         logger.error(f"Required genre column 'top_genre' not found in song_metadata. Available columns: {list(song_metadata.columns)}")
@@ -89,7 +87,6 @@ def split_data(interactions, song_metadata, test_size=0.5, random_state=42, min_
         )
         filtered_interactions[genre_column] = filtered_interactions[genre_column].fillna('unknown_genre')
 
-    # Identify language column
     language_column = 'language'
     if language_column not in song_metadata.columns:
         logger.warning(f"Language column 'language' not found in song_metadata. Available columns: {list(song_metadata.columns)}. Using fallback.")
@@ -153,7 +150,6 @@ def split_data(interactions, song_metadata, test_size=0.5, random_state=42, min_
     train_interactions = pd.concat(train_interactions, ignore_index=True)
     test_interactions = pd.concat(test_interactions, ignore_index=True)
 
-    # Save splits to disk if saved_data_dir is provided
     if saved_data_dir and train_split_path and test_split_path:
         os.makedirs(saved_data_dir, exist_ok=True)
         train_interactions.to_csv(train_split_path, index=False)
@@ -224,10 +220,8 @@ def initialize_shared_resources(config):
     """
     logger.info("Initializing resources")
     
-    # Define paths for saving/loading mappings
     mappings_path = os.path.join(config['saved_data_dir'], f"mappings_u{config['max_users']}.pkl") if config.get('saved_data_dir') else None
 
-    # Load initial raw data (full dataset)
     system = RecommendationSystem(data_dir=config['data_path'])
     system.load_data(max_users=config['max_users'])
     
@@ -240,16 +234,13 @@ def initialize_shared_resources(config):
         logger.error("No data loaded from initial DataManager setup.")
         raise ValueError("Failed to load data")
 
-    # Ensure consistency across raw data
     full_user_interactions, full_song_metadata, full_song_features = check_song_id_consistency(
         user_interactions_raw, song_metadata_raw, song_features_raw
     )
-    # Update data manager with consistent full data
     system.data_manager.user_loader.interactions = full_user_interactions
     system.data_manager.song_loader.song_metadata = full_song_metadata
     system.data_manager.song_loader.song_features = full_song_features
 
-    # Split data BEFORE creating mappings and training recommenders
     train_interactions, test_interactions = split_data(
         full_user_interactions,
         full_song_metadata,
@@ -263,10 +254,8 @@ def initialize_shared_resources(config):
     logger.info(f"Data split into Train: {len(train_interactions)} interactions, Test: {len(test_interactions)} interactions.")
     logger.info(f"Data diversity: {len(train_interactions['user_id'].unique())} unique users in train, {train_interactions['song_id'].nunique()} unique songs in train")
 
-    # Log train_interactions columns after split_data
     logger.info(f"Columns in train_interactions after split_data: {list(train_interactions.columns)}")
 
-    # Mappings will now be created based on the training data
     song_to_tier_map = {}
     song_to_pop_map = {}
     song_to_fam_map = {}
@@ -319,7 +308,6 @@ def initialize_shared_resources(config):
             except Exception as e:
                 logger.error(f"Error saving mappings to cache: {e}")
 
-    # Initialize recommenders (all instances are created)
     content_recommender = ContentBasedRecommender(
         tier_weights=config['tier_weights'],
         user_profiles={},
@@ -355,8 +343,22 @@ def initialize_shared_resources(config):
         related_genres_map=related_genres_map,
         song_to_artist=song_to_artist_map
     )
+    hybrid_recommender = HybridRecommender(
+        content_recommender=content_recommender,
+        mf_recommender=mf_recommender,
+        content_weight=config.get('hybrid_content_weight', 0.5),
+        mf_weight=config.get('hybrid_mf_weight', 0.5),
+        tier_weights=config['tier_weights'],
+        song_to_tier=song_to_tier_map,
+        song_to_pop=song_to_pop_map,
+        song_to_fam=song_to_fam_map,
+        song_to_genres=song_to_genres_map,
+        song_to_language=song_to_language_map,
+        user_profiles={},
+        user_extended_genres_cache={},
+        related_genres_map=related_genres_map
+    )
     
-    # Conditionally add recommenders to the system based on config['recommender_types_to_run']
     shared_recommenders = {}
     if 'ContentBased' in config.get('recommender_types_to_run', []):
         system.add_recommender(content_recommender)
@@ -367,307 +369,188 @@ def initialize_shared_resources(config):
     if 'MatrixFactorization' in config.get('recommender_types_to_run', []):
         system.add_recommender(mf_recommender)
         shared_recommenders['mf_recommender'] = mf_recommender
+    if 'HybridContentMF' in config.get('recommender_types_to_run', []):
+        system.add_recommender(hybrid_recommender)
+        shared_recommenders['hybrid_recommender'] = hybrid_recommender
 
-    # Create cache directory for recommender matrices
-    os.makedirs(config['cache_dir'], exist_ok=True)
-    logger.info(f"Ensured cache directory exists: {config['cache_dir']}")
-
-    # Train recommenders using the training interactions
-    recommender_types_to_train_initially = config.get('recommender_types_to_run', [])
-    for name in recommender_types_to_train_initially:
-        recommender_obj = None
-        if name == 'ContentBased' and 'content_recommender' in shared_recommenders:
-            recommender_obj = shared_recommenders['content_recommender']
-        elif name == 'CollaborativeFiltering' and 'cf_recommender' in shared_recommenders:
-            recommender_obj = shared_recommenders['cf_recommender']
-        elif name == 'MatrixFactorization' and 'mf_recommender' in shared_recommenders:
-            recommender_obj = shared_recommenders['mf_recommender']
-        
-        if recommender_obj:
-            recommender_obj.train(
-                user_interactions=train_interactions,
-                song_features=full_song_features,
-                song_metadata=full_song_metadata,
-                artist_identification=artist_identification_raw,
-                testing_mode=config['verbose'],
-                cache_dir=config['cache_dir']
-            )
-            logger.debug(f"After {name} train, user_profiles has {len(recommender_obj.user_profiles)} entries.")
-        else:
-            logger.warning(f"Recommender '{name}' not found in shared_recommenders for initial explicit training. Skipping.")
-    logger.info("Recommenders initialized and initially trained with training data.")
-
-    return {
+    cache_dir = config.get('cache_dir')
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+    
+    shared_data = {
         'system': system,
-        'content_recommender': shared_recommenders.get('content_recommender'),
-        'cf_recommender': shared_recommenders.get('cf_recommender'),
-        'mf_recommender': shared_recommenders.get('mf_recommender'),
         'train_interactions': train_interactions,
         'test_interactions': test_interactions,
         'song_metadata': full_song_metadata,
         'song_features': full_song_features,
-        'song_to_tier_map': song_to_tier_map,
-        'song_to_pop_map': song_to_pop_map,
-        'song_to_fam_map': song_to_fam_map,
-        'song_to_genres_map': song_to_genres_map,
-        'song_to_language_map': song_to_language_map,
-        'related_genres_map': related_genres_map,
-        'song_to_artist_map': song_to_artist_map
+        'artist_identification': artist_identification_raw,
+        'mappings': {
+            'song_to_tier_map': song_to_tier_map,
+            'song_to_pop_map': song_to_pop_map,
+            'song_to_fam_map': song_to_fam_map,
+            'song_to_genres_map': song_to_genres_map,
+            'song_to_language_map': song_to_language_map,
+            'related_genres_map': related_genres_map,
+            'song_to_artist_map': song_to_artist_map
+        },
+        'content_recommender': content_recommender,
+        'cf_recommender': cf_recommender,
+        'mf_recommender': mf_recommender,
+        'hybrid_recommender': hybrid_recommender
     }
+    
+    return shared_data
 
-def generate_recommendations_for_user(user_id, k, config, shared_data, recommender_key):
-    """Generate recommendations for a single user."""
+def _load_and_apply_component_tier_weights(hybrid_recommender, component_name, k, config, shared_data):
+    """Load and apply optimized tier weights to a component of the HybridRecommender."""
     try:
-        recommender = shared_data.get(recommender_key) # Use .get() to safely access
-        if recommender is None:
-            logger.error(f"Recommender '{recommender_key}' not found in shared_data. Cannot generate recommendations.")
-            return None
-
-        recs = recommender.recommend(
-            user_id=user_id,
-            n=k,
-            exclude_listened=False,
-            include_metadata=True,
-            user_interactions=shared_data['train_interactions'],
-            testing_mode=config['verbose']
-        )
-        return recs if not recs.empty else None
-    except Exception as e:
-        logger.error(f"Error generating recommendations for user {user_id} with {recommender_key}: {str(e)}")
-        return None
-
-def sequential_recommendations(config, eval_users, k, shared_data, recommender_key):
-    """Generate recommendations sequentially."""
-    recommender_name_map = {
-        'content_recommender': 'ContentBased',
-        'cf_recommender': 'CollaborativeFiltering',
-        'mf_recommender': 'MatrixFactorization'
-    }
-    recommender_name = recommender_name_map.get(recommender_key, recommender_key)
-    logger.info(f"Starting sequential recommendation generation for {recommender_name} with k={k} for {len(eval_users)} users.")
-
-    recs_list = []
-    for user_id in eval_users:
-        recs = generate_recommendations_for_user(user_id, k, config, shared_data, recommender_key)
-        if recs is not None:
-            recs_list.append(recs)
-
-    valid_recs = [recs for recs in recs_list if recs is not None and not recs.empty]
-    if not valid_recs:
-        logger.error(f"No valid recommendations generated for {recommender_name} with k={k}. Metrics will be 0.0 for this k.")
-        return pd.DataFrame()
-
-    total_recs_generated = sum(len(df) for df in valid_recs)
-    logger.info(f"Successfully generated {total_recs_generated} recommendations for {recommender_name} with k={k} from {len(valid_recs)} users.")
-    return pd.concat(valid_recs, ignore_index=True)
-
-def perform_evaluation_run(config: dict, shared_data, recommender_key):
-    """Performs a single evaluation run with the given config and shared data."""
-    recommender_name_map = {
-        'content_recommender': 'ContentBased',
-        'cf_recommender': 'CollaborativeFiltering',
-        'mf_recommender': 'MatrixFactorization'
-    }
-    recommender_name = recommender_name_map.get(recommender_key, recommender_key)
-    metrics = {}
-    exposure_by_k = {}
-    tier_diversity_by_k = {}
-    gini_by_k = {}
-
-    recommender = shared_data.get(recommender_key) # Use .get() to safely access
-    if recommender is None:
-        logger.error(f"Recommender '{recommender_key}' not found in shared_data for evaluation. Skipping.")
-        return {}, {}
-
-    test_interactions = shared_data['test_interactions']
-    eval_users = config['eval_users']
-
-    if not eval_users:
-        logger.error(f"No valid evaluation users found for {recommender_name}. Cannot run recommendation or evaluation.")
-        return {}, {}
-
-    logger.info(f"Number of evaluation users selected for {recommender_name}: {len(eval_users)}")
-
-    for k in config['k_values']:
-        eval_recs = sequential_recommendations(config, eval_users, k, shared_data, recommender_key)
-
-        if eval_recs.empty:
-            logger.error(f"SKIPPING EVALUATION: No recommendations generated for {recommender_name} with k={k}. Metrics will be 0.0 for this k.")
-            for metric_name in ['Precision', 'Genre Precision', 'Language Precision', 'Recall', 'NDCG', 'Hit Rate', 'Emerging Artist Hit Rate', 'Coverage (%)', 'Diversity', 'Novelty', 'Emerging Artist Exposure Index']:
-                if metric_name not in metrics:
-                    metrics[metric_name] = {}
-                metrics[metric_name][k] = 0.0
-            tier_diversity_by_k[k] = 0.0
-            gini_by_k[k] = 0.0
-            continue
-
-        shared_data['system'].track_exposure(eval_recs, recommender.song_to_artist)
-        exposure_by_k[k] = shared_data['system'].artist_exposure.copy()
-
-        if recommender_key == 'content_recommender':
-            evaluator = RecommendationEvaluator(
-                item_features=recommender.item_features,
-                item_ids=recommender.item_ids,
-                song_metadata=recommender.song_metadata,
-                k_values=[k]
-            )
-        elif recommender_key == 'cf_recommender' or recommender_key == 'mf_recommender':
-            evaluator = CFRecommendationEvaluator(
-                song_features=shared_data['song_features'],
-                item_ids=list(recommender.song_id_to_index.keys()),
-                song_metadata=recommender.song_metadata,
-                k_values=[k]
-            )
+        db_file = os.path.join(config['optuna_db_path'], f"optuna_study_{component_name}_k{k}.db")
+        if os.path.exists(db_file):
+            weights, _ = load_optuna_weights(db_file, f"study_{component_name}_k{k}")
+            if weights:
+                component_map = {
+                    'ContentBased': hybrid_recommender.content_recommender,
+                    'MatrixFactorization': hybrid_recommender.mf_recommender
+                }
+                component_recommender = component_map.get(component_name)
+                if component_recommender:
+                    component_recommender.tier_weights = weights
+                    logger.info(f"Applied optimized tier weights to {component_name} component for k={k}: {weights}")
+                else:
+                    logger.warning(f"Component {component_name} not found in hybrid recommender. Skipping weight application.")
+            else:
+                logger.warning(f"No optimized weights loaded for {component_name} at k={k}. Using default weights.")
+                component_map = {
+                    'ContentBased': hybrid_recommender.content_recommender,
+                    'MatrixFactorization': hybrid_recommender.mf_recommender
+                }
+                component_recommender = component_map.get(component_name)
+                if component_recommender:
+                    component_recommender.tier_weights = config['tier_weights']
+                    logger.info(f"Applied default tier weights to {component_name} component for k={k}: {config['tier_weights']}")
         else:
-            raise ValueError(f"Unknown recommender key for evaluation: {recommender_key}")
-        
-        current_k_metrics = evaluator.evaluate(recommendations=eval_recs, test_interactions=test_interactions)
-        for metric_name, values in current_k_metrics.items():
-            if metric_name not in metrics:
-                metrics[metric_name] = {}
-            metrics[metric_name][k] = values.get(k, 0.0)
-
-        exposure_result = shared_data['system'].analyze_exposure_distribution(
-            song_metadata=recommender.song_metadata
-        )
-        tier_diversity_by_k[k] = exposure_result.get('tier_diversity', 0.0)
-        gini_by_k[k] = exposure_result.get('gini_coefficient', 0.0)
-
-    loss = {}
-    if any(k in m for m in metrics.values() for k in config['k_values']):
-        loss_calculator = config['loss_calculators'][recommender_name]  # Use recommender-specific loss calculator
-        # Unpack the three dictionaries returned by compute_objective_loss
-        loss_results_dict, ls_results_dict, as_results_dict = loss_calculator.compute_objective_loss(
-            metrics=metrics,
-            k_values=config['k_values'],
-            tier_diversity_by_k=tier_diversity_by_k,
-            gini_by_k=gini_by_k
-        )
-        # Assign only the actual loss dictionary to the 'loss' variable
-        loss = loss_results_dict 
-    else:
-        logger.error(f"No valid metrics found to compute objective loss for {recommender_name}. Returning empty loss.")
-
-    return metrics, loss
+            logger.warning(f"Optuna DB file for {component_name} at k={k} not found. Using default weights.")
+            component_map = {
+                'ContentBased': hybrid_recommender.content_recommender,
+                'MatrixFactorization': hybrid_recommender.mf_recommender
+            }
+            component_recommender = component_map.get(component_name)
+            if component_recommender:
+                component_recommender.tier_weights = config['tier_weights']
+                logger.info(f"Applied default tier weights to {component_name} component for k={k}: {config['tier_weights']}")
+    except Exception as e:
+        logger.error(f"Error loading/applying weights for {component_name} at k={k}: {str(e)}")
+        component_map = {
+            'ContentBased': hybrid_recommender.content_recommender,
+            'MatrixFactorization': hybrid_recommender.mf_recommender
+        }
+        component_recommender = component_map.get(component_name)
+        if component_recommender:
+            component_recommender.tier_weights = config['tier_weights']
+            logger.info(f"Applied default tier weights to {component_name} component for k={k} due to error: {config['tier_weights']}")
 
 def execute_training(config, shared_data):
-    """Executes the training phase for specified recommenders."""
-    logger.info("\n--- Starting Training Phase ---")
-    recommender_names = config.get('recommender_types_to_run', [])
-    if not recommender_names:
-        logger.info("No recommenders specified for training. Skipping training phase.")
+    """Train the recommendation system based on config."""
+    logger.info("--- Starting Training Phase ---")
+    
+    if config.get('skip_training', False):
+        logger.info("Training skipped as per config.")
         return
-    logger.info("Recommenders were trained during resource initialization using the training data.")
+
+    system = shared_data['system']
+    train_interactions = shared_data['train_interactions']
+    song_metadata = shared_data['song_metadata']
+    song_features = shared_data['song_features']
+    
+    logger.info(f"Training with {len(train_interactions)} interactions")
+    system.train(
+        interactions=train_interactions,
+        song_metadata=song_metadata,
+        song_features=song_features,
+        verbose=config['verbose']
+    )
+    
     logger.info("--- Training Phase Complete ---")
 
 def execute_optimization(config, shared_data):
-    """Executes the optimization phase for recommenders' weights."""
-    logger.info("\n--- Starting Optimization Process ---")
+    """Run optimization for all recommenders and k-values."""
+    logger.info("--- Starting Optimization Phase ---")
     
     if not config.get('run_optimization', False):
-        logger.info("Optimization is not enabled in config. Skipping optimization phase.")
+        logger.info("Optimization skipped as per config.")
         return {}
 
-    # Ensure TensorBoard log directory exists
-    os.makedirs(config['tensorboard_log_dir'], exist_ok=True)
-    logger.info(f"Ensured TensorBoard log directory exists: {config['tensorboard_log_dir']}")
-
-    optimized_weights_per_recommender = {}
-    tiers_for_optimization = [
-        'emerging_new', 'emerging_trending', 'rising_established',
-        'mid_tier', 'established', 'established_trending', 'established_legacy'
-    ]
-    
-    recommender_keys_to_optimize = []
-    if 'ContentBased' in config.get('recommender_types_to_run', []):
-        recommender_keys_to_optimize.append('content_recommender')
-    if 'CollaborativeFiltering' in config.get('recommender_types_to_run', []):
-        recommender_keys_to_optimize.append('cf_recommender')
-    if 'MatrixFactorization' in config.get('recommender_types_to_run', []):
-        recommender_keys_to_optimize.append('mf_recommender')
-
-    if not recommender_keys_to_optimize:
-        logger.info("No optimizable recommenders specified. Skipping optimization.")
-        return {}
-
-    for recommender_key in recommender_keys_to_optimize:
-        recommender = shared_data.get(recommender_key) # Use .get() to safely access
-        if recommender is None:
-            logger.warning(f"Recommender '{recommender_key}' not found in shared_data. Skipping optimization for this recommender.")
-            continue
-
-        recommender_name_map = {
-            'content_recommender': 'ContentBased',
-            'cf_recommender': 'CollaborativeFiltering',
-            'mf_recommender': 'MatrixFactorization'
-        }
-        recommender_name = recommender_name_map.get(recommender_key, recommender_key)
-
+    best_weights_per_recommender = {}
+    for recommender_name in config.get('recommender_types_to_run', []):
+        best_weights_per_recommender[recommender_name] = {}
         for k_val in config['k_values']:
-            logger.info(f"Running optimization for {recommender_name} at k={k_val}")
-            shared_data['system'].artist_exposure = {}
-            
-            if recommender_key == 'content_recommender':
-                evaluator = RecommendationEvaluator(
-                    item_features=recommender.item_features,
-                    item_ids=recommender.item_ids,
-                    song_metadata=recommender.song_metadata,
-                    k_values=config['k_values']
-                )
-            elif recommender_key == 'cf_recommender' or recommender_key == 'mf_recommender':
-                evaluator = CFRecommendationEvaluator(
-                    song_features=shared_data['song_features'],
-                    item_ids=list(recommender.song_id_to_index.keys()),
-                    song_metadata=recommender.song_metadata,
-                    k_values=config['k_values']
-                )
-
-            # The optimize_tier_weights function now correctly returns 3 values.
-            best_weights, best_loss, best_metrics_from_opt = optimize_tier_weights(
-                config=config,
-                system=shared_data['system'],
-                recommender=recommender, # Pass the recommender object directly
-                evaluator=evaluator,
-                train_interactions=shared_data['train_interactions'],
-                test_interactions=shared_data['test_interactions'],
-                eval_users=config['eval_users'],
-                tiers=tiers_for_optimization,
+            logger.info(f"Optimizing for {recommender_name} with k={k_val}")
+            weights, loss, metrics = optimize_tier_weights(
                 recommender_name=recommender_name,
-                weight_options=config['weight_options'],
-                optimization_method=config['optimization_method'],
                 k=k_val,
-                n_trials=config['n_trials']
+                config=config,
+                shared_data=shared_data
             )
-            if recommender_name not in optimized_weights_per_recommender:
-                optimized_weights_per_recommender[recommender_name] = {}
-            optimized_weights_per_recommender[recommender_name][k_val] = (best_weights, best_loss, best_metrics_from_opt)
-            print(f"\nOptimization for {recommender_name} at k={k_val} complete. Best loss: {best_loss:.4f}")
-            print(f"Best weights: {best_weights}")
-    logger.info("--- Optimization Process Complete ---")
-    return optimized_weights_per_recommender
+            best_weights_per_recommender[recommender_name][k_val] = (weights, loss, metrics)
+            logger.info(f"Best weights for {recommender_name} at k={k_val}: {weights}")
+    
+    return best_weights_per_recommender
+
+def perform_evaluation_run(config, shared_data, recommender_key):
+    """Helper to evaluate a single recommender for a given k."""
+    system = shared_data['system']
+    test_interactions = shared_data['test_interactions']
+    song_metadata = shared_data['song_metadata']
+    
+    metrics = {}
+    loss = {}
+    
+    for k_val in config['k_values']:
+        try:
+            current_metrics = system.evaluate(
+                recommender_name=recommender_key,
+                interactions=test_interactions,
+                song_metadata=song_metadata,
+                k=k_val,
+                verbose=config['verbose']
+            )
+            metrics.update(current_metrics)
+            
+            if recommender_key in config['loss_calculators']:
+                loss_calculator = config['loss_calculators'][recommender_key]
+                current_loss = loss_calculator.compute_loss(current_metrics, k=k_val)
+                loss[k_val] = current_loss
+            else:
+                loss[k_val] = 0.0
+        except Exception as e:
+            logger.error(f"Error evaluating {recommender_key} for k={k_val}: {str(e)}")
+            for metric_name in ['Precision', 'Genre Precision', 'Language Precision', 'Recall', 'NDCG', 'Hit Rate', 'Emerging Artist Hit Rate', 'Coverage (%)', 'Diversity', 'Novelty', 'Emerging Artist Exposure Index']:
+                metrics[metric_name] = metrics.get(metric_name, {})
+                metrics[metric_name][k_val] = 0.0
+            loss[k_val] = 0.0
+    
+    return metrics, loss
 
 def execute_evaluation(config, shared_data, best_weights_per_recommender):
-    """Executes the evaluation phase for specified recommenders."""
+    """Run evaluation for all recommenders and k-values."""
     logger.info("\n--- Starting Evaluation Phase ---")
     
     metrics_path = os.path.join(config['saved_data_dir'], f"metrics_u{config['max_users']}.pkl") if config.get('saved_data_dir') else None
-
-    if config['load_saved_data'] and metrics_path and os.path.exists(metrics_path):
-        logger.info(f"Attempting to load saved metrics for {config['max_users']} users from {metrics_path}. Will re-compute for display.")
-        with open(metrics_path, 'rb') as f:
-            saved_metrics = pickle.load(f)
-
+    
     final_metrics_per_recommender = {}
     final_loss_per_recommender = {}
-
-    recommender_keys_to_evaluate = []
+    
     recommender_names_from_config = config.get('recommender_types_to_run', [])
+    recommender_keys_to_evaluate = []
+    
     if 'ContentBased' in recommender_names_from_config:
         recommender_keys_to_evaluate.append('content_recommender')
     if 'CollaborativeFiltering' in recommender_names_from_config:
         recommender_keys_to_evaluate.append('cf_recommender')
     if 'MatrixFactorization' in recommender_names_from_config:
         recommender_keys_to_evaluate.append('mf_recommender')
+    if 'HybridContentMF' in recommender_names_from_config:
+        recommender_keys_to_evaluate.append('hybrid_recommender')
 
     if not recommender_keys_to_evaluate:
         logger.info("No recommenders specified for evaluation. Skipping evaluation phase.")
@@ -683,7 +566,7 @@ def execute_evaluation(config, shared_data, best_weights_per_recommender):
         current_config_for_k['k_values'] = [k_val]
 
         for recommender_key in recommender_keys_to_evaluate:
-            recommender = shared_data.get(recommender_key) # Use .get() to safely access
+            recommender = shared_data.get(recommender_key)
             if recommender is None:
                 logger.warning(f"Recommender '{recommender_key}' not found in shared_data for evaluation. Skipping.")
                 continue
@@ -691,13 +574,21 @@ def execute_evaluation(config, shared_data, best_weights_per_recommender):
             recommender_name_map = {
                 'content_recommender': 'ContentBased',
                 'cf_recommender': 'CollaborativeFiltering',
-                'mf_recommender': 'MatrixFactorization'
+                'mf_recommender': 'MatrixFactorization',
+                'hybrid_recommender': 'HybridContentMF'
             }
             recommender_name = recommender_name_map.get(recommender_key, recommender_key)
 
             weights_for_this_recommender_k = best_weights_per_recommender.get(recommender_name, {}).get(k_val, (config['tier_weights'], None, None))[0]
-            recommender.tier_weights = weights_for_this_recommender_k
-            logger.info(f"Using weights for {recommender_name} at k={k_val}: {recommender.tier_weights}")
+            if recommender_name == 'HybridContentMF':
+                recommender.content_weight = weights_for_this_recommender_k.get('content_weight', config.get('hybrid_content_weight', 0.5))
+                recommender.mf_weight = weights_for_this_recommender_k.get('mf_weight', config.get('hybrid_mf_weight', 0.5))
+                logger.info(f"Applied hybrid weights for {recommender_name} at k={k_val}: Content={recommender.content_weight:.2f}, MF={recommender.mf_weight:.2f}")
+                _load_and_apply_component_tier_weights(recommender, 'ContentBased', k_val, config, shared_data)
+                _load_and_apply_component_tier_weights(recommender, 'MatrixFactorization', k_val, config, shared_data)
+            else:
+                recommender.tier_weights = weights_for_this_recommender_k
+                logger.info(f"Using weights for {recommender_name} at k={k_val}: {recommender.tier_weights}")
 
             shared_data['system'].artist_exposure = {}
             metrics_from_run, loss_from_run = perform_evaluation_run(current_config_for_k, shared_data, recommender_key)
@@ -734,7 +625,7 @@ def execute_evaluation(config, shared_data, best_weights_per_recommender):
 
     logger.info("\n--- Final Metrics with Weights (Across all k values) ---")
     sorted_k_values = sorted(config['k_values'])
-    for recommender_name in ['ContentBased', 'CollaborativeFiltering', 'MatrixFactorization']:
+    for recommender_name in ['ContentBased', 'CollaborativeFiltering', 'MatrixFactorization', 'HybridContentMF']:
         if recommender_name in final_metrics_per_recommender:
             metrics_to_print = final_metrics_per_recommender[recommender_name]
             loss_to_print = final_loss_per_recommender[recommender_name]
@@ -782,11 +673,9 @@ def execute_recommendation_comparison(config, shared_data, best_weights_per_reco
     print(f"USER LISTENING HISTORY SONGS FOR USER {sample_user_id}")
     print("="*80)
 
-    # Define columns to use
     genre_column = 'top_genre'
     language_column = 'language'
 
-    # Verify columns exist in user_history
     if genre_column not in user_history.columns:
         logger.error(f"Genre column '{genre_column}' not found in user_history. Available columns: {list(user_history.columns)}")
         user_history[genre_column] = 'unknown_genre'
@@ -794,14 +683,12 @@ def execute_recommendation_comparison(config, shared_data, best_weights_per_reco
         logger.error(f"Language column '{language_column}' not found in user_history. Available columns: {list(user_history.columns)}")
         user_history[language_column] = 'unknown_language'
 
-    # Merge only title and artist_name from song_metadata
     history_with_metadata = user_history.merge(
         shared_data['song_metadata'][['song_id', 'title', 'artist_name']],
         on='song_id',
         how='left'
     )
 
-    # Fill NaN values
     history_with_metadata[genre_column] = history_with_metadata[genre_column].fillna('unknown_genre')
     history_with_metadata[language_column] = history_with_metadata[language_column].fillna('unknown_language')
     history_with_metadata['title'] = history_with_metadata['title'].fillna('unknown_title')
@@ -834,7 +721,8 @@ def execute_recommendation_comparison(config, shared_data, best_weights_per_reco
     recommender_key_map = {
         'ContentBased': 'content_recommender',
         'CollaborativeFiltering': 'cf_recommender',
-        'MatrixFactorization': 'mf_recommender'
+        'MatrixFactorization': 'mf_recommender',
+        'HybridContentMF': 'hybrid_recommender'
     }
 
     for recommender_name in recommender_names_to_compare:
@@ -843,14 +731,36 @@ def execute_recommendation_comparison(config, shared_data, best_weights_per_reco
             logger.warning(f"Recommender name '{recommender_name}' not found in key map. Skipping comparison.")
             continue
 
-        recommender = shared_data.get(recommender_data_key) # Use .get() to safely access
-        if recommender is None:
+        recommender_obj = shared_data.get(recommender_data_key)
+        if recommender_obj is None:
             logger.warning(f"Recommender '{recommender_data_key}' not found in shared_data for comparison. Skipping.")
             continue
 
-        weights_for_this_recommender = best_weights_per_recommender.get(recommender_name, {}).get(max_k_for_comparison, (config['tier_weights'], None, None))[0]
-        recommender.tier_weights = weights_for_this_recommender
-        logger.info(f"Using weights for comparison for {recommender_name}: {weights_for_this_recommender}")
+        if recommender_name in best_weights_per_recommender and max_k_for_comparison in best_weights_per_recommender[recommender_name]:
+            weights_for_this_recommender = best_weights_per_recommender[recommender_name][max_k_for_comparison][0]
+            if recommender_name == 'HybridContentMF':
+                recommender_obj.content_weight = weights_for_this_recommender.get('content_weight', 0.5)
+                recommender_obj.mf_weight = weights_for_this_recommender.get('mf_weight', 0.5)
+                logger.info(f"Using hybrid weights for comparison for {recommender_name}: Content={recommender_obj.content_weight:.2f}, MF={recommender_obj.mf_weight:.2f}")
+
+                logger.info(f"Applying optimized tier weights to Hybrid components for comparison...")
+                _load_and_apply_component_tier_weights(recommender_obj, 'ContentBased', max_k_for_comparison, config, shared_data)
+                _load_and_apply_component_tier_weights(recommender_obj, 'MatrixFactorization', max_k_for_comparison, config, shared_data)
+
+            else:
+                recommender_obj.tier_weights = weights_for_this_recommender
+                logger.info(f"Using weights for comparison for {recommender_name}: {recommender_obj.tier_weights}")
+        else:
+            logger.warning(f"No optimized weights found for {recommender_name} at k={max_k_for_comparison}. Using default config weights.")
+            if recommender_name == 'HybridContentMF':
+                recommender_obj.content_weight = config.get('hybrid_content_weight', 0.5)
+                recommender_obj.mf_weight = config.get('hybrid_mf_weight', 0.5)
+                logger.info(f"Using default tier weights for Hybrid components for comparison (no optimized found)...")
+                _load_and_apply_component_tier_weights(recommender_obj, 'ContentBased', max_k_for_comparison, config, shared_data)
+                _load_and_apply_component_tier_weights(recommender_obj, 'MatrixFactorization', max_k_for_comparison, config, shared_data)
+            else:
+                recommender_obj.tier_weights = config['tier_weights']
+
 
         print("\n" + "="*80)
         print(f"RECOMMENDATION APPROACH COMPARISON FOR {recommender_name.upper()}")
@@ -860,7 +770,7 @@ def execute_recommendation_comparison(config, shared_data, best_weights_per_reco
                 system=shared_data['system'],
                 user_id=sample_user_id,
                 seed_item_id=sample_song_id,
-                recommender_name=recommender_name,
+                recommender=recommender_obj,
                 n=config['n_recs'],
                 testing_mode=config['verbose']
             )
@@ -895,7 +805,6 @@ def main_run(config):
     """Main function to run the recommendation system based on config."""
     logger.info("--- Initializing resources ---")
 
-    # Set up overall TensorBoard writer for high-level run status
     overall_log_dir = os.path.join(config['tensorboard_log_dir'], 'overall_run')
     os.makedirs(overall_log_dir, exist_ok=True)
     overall_writer = tf.summary.create_file_writer(overall_log_dir)
@@ -906,7 +815,6 @@ def main_run(config):
 
     shared_data = initialize_shared_resources(config)
     
-    # The eval_users are derived from the split data, and selected for comparison
     initial_eval_users_from_test = shared_data['test_interactions']['user_id'].unique()
     user_counts = shared_data['train_interactions']['user_id'].value_counts()
     config['eval_users'] = user_counts[user_counts.index.isin(initial_eval_users_from_test)].index.tolist()
@@ -916,7 +824,7 @@ def main_run(config):
         with overall_writer.as_default():
             tf.summary.text("Run Status", "Skipped evaluation and comparison due to no valid users", step=1)
             tf.summary.scalar("Overall_End_Timestamp", time.time(), step=1)
-            tf.summary.scalar("Overall_Run_Success", 0.0, step=1) # Indicate partial failure
+            tf.summary.scalar("Overall_Run_Success", 0.0, step=1)
         overall_writer.flush()
         overall_writer.close()
         return
@@ -924,7 +832,6 @@ def main_run(config):
     best_weights_per_recommender = {}
 
     if config.get('run_optimization', False):
-        # Run optimization and populate best_weights_per_recommender
         optimized_results = execute_optimization(config, shared_data)
         if optimized_results:
             for recommender_name, k_results in optimized_results.items():
@@ -943,12 +850,10 @@ def main_run(config):
             if recommender_name not in best_weights_per_recommender:
                 best_weights_per_recommender[recommender_name] = {}
             for k_val in config['k_values']:
-                # CORRECTED: Study name for loading consistent with saving
                 db_file = os.path.join(config['optuna_db_path'], f"optuna_study_{recommender_name}_k{k_val}.db") 
                 if os.path.exists(db_file):
                     best_weights, best_loss = load_optuna_weights(db_file, f"study_{recommender_name}_k{k_val}")
                     if best_weights:
-                        # Dummy metrics dict, as load_optuna_weights only gets weights and loss
                         best_metrics_from_opt = {} 
                         best_weights_per_recommender[recommender_name][k_val] = (best_weights, best_loss, best_metrics_from_opt)
                         logger.info(f"Loaded optimized weights for {recommender_name} at k={k_val}: {best_weights}")
@@ -965,20 +870,26 @@ def main_run(config):
             if recommender_name not in best_weights_per_recommender:
                 best_weights_per_recommender[recommender_name] = {}
             for k_val in config['k_values']:
-                best_weights_per_recommender[recommender_name][k_val] = (config['tier_weights'], float('inf'), {})
+                if recommender_name == 'HybridContentMF':
+                    best_weights_per_recommender[recommender_name][k_val] = (
+                        {'content_weight': config.get('hybrid_content_weight', 0.5),
+                         'mf_weight': config.get('hybrid_mf_weight', 0.5)},
+                        float('inf'), {}
+                    )
+                else:
+                    best_weights_per_recommender[recommender_name][k_val] = (config['tier_weights'], float('inf'), {})
+
 
     execute_training(config, shared_data)
-    # The call to execute_optimization is handled by the if/elif above.
     execute_evaluation(config, shared_data, best_weights_per_recommender)
     execute_recommendation_comparison(config, shared_data, best_weights_per_recommender)
 
     logger.info("\nAll configured processes complete.")
     
-    # Final TensorBoard log for overall run completion
     with overall_writer.as_default():
         tf.summary.text("Run Status", "Completed main recommendation system execution successfully", step=1)
         tf.summary.scalar("Overall_End_Timestamp", time.time(), step=1)
-        tf.summary.scalar("Overall_Run_Success", 1.0, step=1) # Indicate full success
+        tf.summary.scalar("Overall_Run_Success", 1.0, step=1)
     overall_writer.flush()
     overall_writer.close()
 
@@ -986,15 +897,15 @@ if __name__ == "__main__":
     base_config = {
         'data_path': '/Users/varadkulkarni/Thesis-FaRM/Recommenation-System/System/Finaldata',
         'optuna_db_path': '/Users/varadkulkarni/Thesis-FaRM/Recommenation-System/System/Finaldata/',
-        'saved_data_dir': '/Users/varadkulkarni/Thesis-FaRM/Recommenation-System/System/SavedData',
-        'load_saved_data': True,  # Set to True to load saved data
-        'run_optimization': True,
+        'saved_data_dir': '/Users/varadkulkarni/Thesis-FaRM/Recommenation-System/System/SavedData2',
+        'load_saved_data': True,
+        'run_optimization': False,
         'load_optimized_weights': True,
-        'max_users': 40000,
-        'k_values': [2,5],
+        'max_users': 400,
+        'k_values': [5],
         'n_recs': 5,
         'min_interactions': 6,
-        'verbose': False, # Set to False for cleaner logs, but user progress bar will remain
+        'verbose': False,
         'tier_weights': {
             'emerging_new': 0.15789473684210525,
             'emerging_trending': 0.2105263157894737,
@@ -1004,16 +915,19 @@ if __name__ == "__main__":
             'established_trending': 0.10526315789473685,
             'established_legacy': 0.10526315789473685
         },
+        'hybrid_content_weight': 0.38,
+        'hybrid_mf_weight': 0.62,
         'optimization_method': 'bayesian',
         'weight_options': [0.1, 0.15, 0.2],
         'n_trials': 200,
         'loss_calculators': {
         'ContentBased': ObjectiveLossCalculator(recommender_name='ContentBased'),
         'CollaborativeFiltering': ObjectiveLossCalculator(recommender_name='CollaborativeFiltering'),
-        'MatrixFactorization': ObjectiveLossCalculator(recommender_name='MatrixFactorization')
+        'MatrixFactorization': ObjectiveLossCalculator(recommender_name='MatrixFactorization'),
+        'HybridContentMF': ObjectiveLossCalculator(recommender_name='HybridContentMF')
     },
-        'recommender_types_to_run': ['CollaborativeFiltering'], # Only ContentBased will be added and trained
+        'recommender_types_to_run': ['HybridContentMF'],
         'cache_dir': os.path.join(project_root, 'System', 'SavedData', 'cache'),
-        'tensorboard_log_dir': os.path.join(project_root, 'System', 'TensorBoardLogs'), # New TensorBoard log directory
+        'tensorboard_log_dir': os.path.join(project_root, 'System', 'TensorBoardLogs'),
     }
     main_run(base_config)

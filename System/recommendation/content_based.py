@@ -6,11 +6,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import StandardScaler
 from System.recommendation.base import RecommenderBase
 from System.recommendation.utils.mappings import create_song_to_tier_mapping, create_artist_metric_mappings, create_genre_mapping, create_language_mapping, compute_related_genres
-from System.recommendation.utils.weights import calculate_language_weights, calculate_genre_weights, calculate_item_weights
+from System.recommendation.utils.weights import calculate_genre_weights, calculate_item_weights # Removed calculate_language_weights
 import logging
 from tqdm import tqdm
 import os
-import pickle # Added for saving/loading profiles
+import pickle
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +33,15 @@ class ContentBasedRecommender(RecommenderBase):
         name: str = "ContentBased"
     ):
         """Initialize the content-based recommender."""
-        # Pass only 'name' to the superclass constructor
         super().__init__(name=name) 
         
-        # Assign tier_weights directly to self
         self.tier_weights = tier_weights
         
         self.excluded_features = excluded_features or []
         self.feature_weights = feature_weights or {
-            'audio_features': 2.5,
+            'audio_features': 8.5,
             'genres': 15.0,
-            'language': 4.0
+            # 'language': 4.0 # Language weight removed, handled by clustering
         }
         self.user_profiles = user_profiles if user_profiles is not None else {}
         self.user_extended_genres_cache = user_extended_genres_cache if user_extended_genres_cache is not None else {}
@@ -89,6 +87,11 @@ class ContentBasedRecommender(RecommenderBase):
         # Ensure song_to_artist is populated (if not already during initialization)
         if self.song_to_artist is None and 'artist_name' in song_metadata.columns:
             self.song_to_artist = dict(zip(song_metadata['song_id'], song_metadata['artist_name']))
+        
+        # Ensure song_to_language is populated
+        if self.song_to_language is None and 'language' in song_metadata.columns:
+            self.song_to_language = dict(zip(song_metadata['song_id'], song_metadata['language']))
+
 
         # Determine cache file paths
         num_users = user_interactions['user_id'].nunique()
@@ -124,7 +127,7 @@ class ContentBasedRecommender(RecommenderBase):
         id_col = next((col for col in song_features.columns if col in ['song_id', 'track_id', 'id']), song_features.columns[0])
         
         # Identify non-feature columns dynamically, ensure 'song_id' is excluded
-        non_feature_cols_dynamic = ['song_id', 'artist_id', 'album_id', 'track_id'] + self.excluded_features
+        non_feature_cols_dynamic = ['song_id', 'artist_id', 'album_id', 'track_id', 'language'] + self.excluded_features # Exclude 'language' from features
         # Filter feature_cols to ensure they are numeric and exclude existing genre columns
         feature_cols = [col for col in song_features.columns if col not in non_feature_cols_dynamic and song_features[col].dtype in ['int64', 'float64'] and not col.startswith('genre_')]
 
@@ -235,7 +238,7 @@ class ContentBasedRecommender(RecommenderBase):
 
         # If user profile not found, try to build it on the fly if interactions are provided
         if user_profile_vector is None and user_interactions is not None and not user_interactions.empty:
-            logger.warning(f"User profile for {user_id} not found. Attempting to build on-the-fly.")
+            #logger.warning(f"User profile for {user_id} not found. Attempting to build on-the-fly.")
             single_user_interactions = user_interactions[user_interactions['user_id'] == user_id]
             if not single_user_interactions.empty:
                 # Pass scaled_item_features and item_ids_list to on-the-fly profile building
@@ -243,7 +246,7 @@ class ContentBasedRecommender(RecommenderBase):
                 if user_id in temp_user_profiles:
                     user_profile_vector = temp_user_profiles[user_id]
                     self.user_profiles[user_id] = user_profile_vector # Store for future use
-                    logger.info(f"Successfully built user profile for {user_id} on-the-fly.")
+                    #logger.info(f"Successfully built user profile for {user_id} on-the-fly.")
                 else:
                     logger.warning(f"Failed to build user profile for {user_id} on-the-fly. Cannot recommend.")
                     return pd.DataFrame()
@@ -259,8 +262,50 @@ class ContentBasedRecommender(RecommenderBase):
             logger.error("Item features not initialized during training. Cannot generate recommendations.")
             return pd.DataFrame()
 
-        # Calculate similarity between user profile and all item features
-        similarities = cosine_similarity(user_profile_vector.reshape(1, -1), self.item_features).flatten()
+        # Determine dominant language(s) from user's listening history
+        user_listened_items = set()
+        if user_interactions is not None:
+            user_listened_items = set(user_interactions[user_interactions['user_id'] == user_id]['song_id'].tolist())
+
+        dominant_languages = []
+        if user_listened_items and self.song_to_language:
+            listened_languages = [self.song_to_language.get(song_id) for song_id in user_listened_items if self.song_to_language.get(song_id)]
+            if listened_languages:
+                # Get the most frequent language(s)
+                language_counts = pd.Series(listened_languages).value_counts()
+                max_count = language_counts.max()
+                dominant_languages = language_counts[language_counts == max_count].index.tolist()
+                if testing_mode:
+                    logger.info(f"User {user_id} dominant language(s): {dominant_languages}")
+            else:
+                logger.debug(f"No language information found for listened songs of user {user_id}.")
+        else:
+            logger.debug(f"No listened items or song_to_language mapping for user {user_id}.")
+
+        # Filter candidate songs by dominant language(s)
+        filtered_item_ids = []
+        filtered_item_features_indices = []
+
+        if dominant_languages:
+            for i, song_id in enumerate(self.item_ids):
+                if self.song_to_language and self.song_to_language.get(song_id) in dominant_languages:
+                    filtered_item_ids.append(song_id)
+                    filtered_item_features_indices.append(i)
+            
+            if not filtered_item_ids:
+                logger.warning(f"No songs found matching dominant language(s) {dominant_languages}. Reverting to all songs.")
+                filtered_item_ids = self.item_ids
+                filtered_item_features_indices = list(range(len(self.item_ids)))
+        else:
+            # If no dominant language found, consider all songs
+            filtered_item_ids = self.item_ids
+            filtered_item_features_indices = list(range(len(self.item_ids)))
+        
+        # Create a temporary item_features array for similarity calculation based on filtered items
+        temp_item_features = self.item_features[filtered_item_features_indices]
+
+        # Calculate similarity between user profile and filtered item features
+        similarities = cosine_similarity(user_profile_vector.reshape(1, -1), temp_item_features).flatten()
         
         # Min-max scale similarities to [0, 1]
         if similarities.max() - similarities.min() > 1e-10:
@@ -268,38 +313,24 @@ class ContentBasedRecommender(RecommenderBase):
         else:
             similarities = np.full_like(similarities, 0.5) # Handle constant similarity case
 
-        user_listened_items = set()
-        if user_interactions is not None:
-            user_listened_items = set(user_interactions[user_interactions['user_id'] == user_id]['song_id'].tolist())
-
-
-        # Calculate dynamic weights for genres and languages for the user's profile
-        # These are used within calculate_item_weights
-        user_language_weights = calculate_language_weights(
-            list(user_listened_items), # Use only listened items for this, not full profile
-            [1.0] * len(user_listened_items), # Assuming uniform play_count for simplicity if not available
-            self.song_to_language
-        )
-        user_genre_weights = calculate_genre_weights(
-            list(user_listened_items), # Use only listened items for this
-            [1.0] * len(user_listened_items), # Assuming uniform play_count for simplicity
-            self.song_to_genres
-        )
-
-
         scores = []
-        for idx, item_id in enumerate(self.item_ids):
+        for idx_in_filtered, item_id in enumerate(filtered_item_ids):
             # Skip if exclude_listened and item is already listened by the user
             if exclude_listened and item_id in user_listened_items:
                 scores.append(-1.0) # Mark for exclusion
                 continue
 
-            # Calculate item weight (incorporating tier_weights, pop, fam)
-            # Use the calculated user_genre_weights and user_language_weights here
+            # Calculate item weight (incorporating tier_weights, pop, fam, and genre weights)
+            user_genre_weights = calculate_genre_weights(
+                list(user_listened_items), # Use only listened items for this
+                [1.0] * len(user_listened_items), # Assuming uniform play_count for simplicity
+                self.song_to_genres
+            )
+
             item_weight_factor = calculate_item_weights(
                 item_id, self.song_to_tier, self.song_to_pop, self.song_to_fam,
                 user_genre_weights, self.song_to_genres,
-                self.song_to_language, user_language_weights,
+                None, None, # Language weights are no longer passed here
                 self.tier_weights # Use the tier weights passed to the recommender's init
             )
             
@@ -326,10 +357,10 @@ class ContentBasedRecommender(RecommenderBase):
             # Ensure item_weight_factor is within a reasonable range (e.g., clamp it)
             item_weight_factor = np.clip(item_weight_factor, 0.0, 2.0) # Example clipping to prevent extreme values
 
-            # Combine similarity and content-based item weights
+            # Combine similarity and content-based item weights (language weight removed)
             final_score = (
-                similarities[idx] * self.feature_weights['audio_features'] +
-                item_weight_factor * (self.feature_weights['genres'] + self.feature_weights['language'])
+                similarities[idx_in_filtered] * self.feature_weights['audio_features'] +
+                item_weight_factor * self.feature_weights['genres']
             )
             scores.append(final_score)
 
@@ -345,7 +376,7 @@ class ContentBasedRecommender(RecommenderBase):
         else:
             scores = np.full_like(scores, 0.0) # All scores are -1.0 or problem
 
-        ranked = sorted(zip(self.item_ids, scores), key=lambda x: -x[1])
+        ranked = sorted(zip(filtered_item_ids, scores), key=lambda x: -x[1])
         
         # Filter out negative scores (listened items or invalid scores)
         ranked = [x for x in ranked if x[1] >= 0]
@@ -443,7 +474,7 @@ class ContentBasedRecommender(RecommenderBase):
         idx = self.song_id_to_index.get(seed_item_id)
         if idx is None:
             logger.error(f"Seed item ID {seed_item_id} not found in song_id_to_index mapping during recommend_similar_items.")
-            return pd.DataFrame() # Return empty DataFrame if seed item's index is not found
+            return pd.DataFrame()
 
         seed_genres = set(self.song_to_genres.get(seed_item_id, []))
         seed_top_genre = None
@@ -455,27 +486,72 @@ class ContentBasedRecommender(RecommenderBase):
         if testing_mode:
             logger.info(f"Seed song {seed_item_id} genres: {seed_genres}, top_genre: {seed_top_genre}")
 
-        similarities = self.similarity_matrix[idx]
-        similarities = (similarities - similarities.min()) / (similarities.max() - similarities.min() + 1e-10)
+        # Determine target language(s) for similar items
+        target_languages = []
+        user_listened_items = set()
+
+        if user_id and self.song_to_language:
+            # Get user's listened items to determine dominant language
+            if self.user_profiles.get(user_id) and 'listened_items' in self.user_profiles.get(user_id):
+                user_listened_items = self.user_profiles[user_id]['listened_items']
+            elif user_id in self.user_profiles: # Fallback if 'listened_items' not directly in profile, but profile exists
+                # This might require re-fetching interactions or assuming user_interactions was passed to recommend()
+                # For now, assume user_listened_items is populated if user_id is passed and interactions are available
+                pass # If user_interactions was passed to recommend, this would be set there.
+            
+            if user_listened_items:
+                listened_languages = [self.song_to_language.get(song_id) for song_id in user_listened_items if self.song_to_language.get(song_id)]
+                if listened_languages:
+                    language_counts = pd.Series(listened_languages).value_counts()
+                    max_count = language_counts.max()
+                    target_languages = language_counts[language_counts == max_count].index.tolist()
+                    if testing_mode:
+                        logger.info(f"User {user_id} dominant language(s) for similar items: {target_languages}")
+        
+        if not target_languages and self.song_to_language: # If no user or no dominant user language, use seed item's language
+            seed_language = self.song_to_language.get(seed_item_id)
+            if seed_language:
+                target_languages = [seed_language]
+                if testing_mode:
+                    logger.info(f"Using seed item's language {seed_language} for similar items.")
+            else:
+                logger.warning(f"No language found for seed item {seed_item_id}. Similar items will not be language filtered.")
+        
+        # Filter candidate items by target language(s)
+        filtered_item_ids_for_similarity = []
+        filtered_indices_for_similarity = []
+
+        if target_languages:
+            for i, song_id in enumerate(self.item_ids):
+                if self.song_to_language and self.song_to_language.get(song_id) in target_languages:
+                    filtered_item_ids_for_similarity.append(song_id)
+                    filtered_indices_for_similarity.append(i)
+            if not filtered_item_ids_for_similarity:
+                logger.warning(f"No similar items found matching target language(s) {target_languages}. Reverting to all songs for similarity calculation.")
+                filtered_item_ids_for_similarity = self.item_ids
+                filtered_indices_for_similarity = list(range(len(self.item_ids)))
+        else:
+            filtered_item_ids_for_similarity = self.item_ids
+            filtered_indices_for_similarity = list(range(len(self.item_ids)))
+
+        # Get similarities from the original matrix, then filter
+        original_similarities = self.similarity_matrix[idx]
+        similarities = original_similarities[filtered_indices_for_similarity]
+
+        # Normalize the filtered similarities
+        if similarities.max() - similarities.min() > 1e-10:
+            similarities = (similarities - similarities.min()) / (similarities.max() - similarities.min() + 1e-10)
+        else:
+            similarities = np.full_like(similarities, 0.5)
 
         scores = similarities.copy()
         
-        # User-specific genre/language weights if user_id is provided
-        user_language_weights = {}
+        # User-specific genre weights if user_id is provided
         user_genre_weights = {}
-        user_profile_data = None
-        user_listened_items = set()
-
-        if user_id:
-            user_profile_data = self.user_profiles.get(user_id)
-            if user_profile_data and 'listened_items' in user_profile_data:
-                user_listened_items = user_profile_data['listened_items']
-                user_language_weights = calculate_language_weights(
-                    list(user_listened_items), [1.0] * len(user_listened_items), self.song_to_language
-                )
-                user_genre_weights = calculate_genre_weights(
-                    list(user_listened_items), [1.0] * len(user_listened_items), self.song_to_genres
-                )
+        if user_id and user_listened_items:
+            user_genre_weights = calculate_genre_weights(
+                list(user_listened_items), [1.0] * len(user_listened_items), self.song_to_genres
+            )
             # If user_extended_genres_cache is empty or user not in it, calculate for similar items
             if user_id not in self.user_extended_genres_cache:
                 current_user_genres = {genre for song_id in user_listened_items for genre in self.song_to_genres.get(song_id, [])}
@@ -496,18 +572,18 @@ class ContentBasedRecommender(RecommenderBase):
             logger.info(f"Extended genres for similar items: {len(extended_genres)} entries.")
 
         non_overlap_count = 0
-        for i, item_id in enumerate(self.item_ids):
+        for i, item_id in enumerate(filtered_item_ids_for_similarity):
             if exclude_seed and item_id == seed_item_id:
                 scores[i] = -1.0 # Mark for exclusion
                 continue
 
             # Check if essential mappings are available before calculating item weight
-            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.song_to_language, self.tier_weights]):
+            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.tier_weights]):
                 logger.warning(f"Required mappings not fully initialized for item weight calculation for item {item_id}. Skipping complex weight calculation.")
                 scores[i] = similarities[i] * self.feature_weights['audio_features'] # Fallback to just similarity
                 continue
 
-            # Calculate item weight factor using mappings
+            # Calculate item weight factor using mappings (language weights removed)
             item_weight_factor = calculate_item_weights(
                 item_id,
                 self.song_to_tier,
@@ -515,8 +591,7 @@ class ContentBasedRecommender(RecommenderBase):
                 self.song_to_fam,
                 user_genre_weights, # Use user-specific genre weights
                 self.song_to_genres,
-                self.song_to_language,
-                user_language_weights, # Use user-specific language weights
+                None, None, # Language weights are no longer passed here
                 self.tier_weights
             )
 
@@ -552,10 +627,10 @@ class ContentBasedRecommender(RecommenderBase):
             # Clip item_weight_factor to prevent extreme values and ensure sensible range
             item_weight_factor = np.clip(item_weight_factor, 0.01, 5.0) # Adjusted clipping values for better range control
 
-            # Combine similarity and content-based item weights for final score
+            # Combine similarity and content-based item weights for final score (language weight removed)
             scores[i] = (
                 similarities[i] * self.feature_weights['audio_features'] +
-                item_weight_factor * (self.feature_weights['genres'] + self.feature_weights['language'])
+                item_weight_factor * self.feature_weights['genres']
             )
             if testing_mode:
                 logger.debug(f"Item {item_id}: Score={scores[i]:.4f}, Similarity={similarities[i]:.4f}, ItemWeightFactor={item_weight_factor:.4f}, Genres={item_genres}")
@@ -579,7 +654,7 @@ class ContentBasedRecommender(RecommenderBase):
 
         # Sort and select top N candidates
         # Filter out items with score -1.0 before sorting
-        ranked_items = [(self.item_ids[i], scores[i]) for i in range(len(self.item_ids)) if scores[i] >= 0]
+        ranked_items = [(filtered_item_ids_for_similarity[i], scores[i]) for i in range(len(filtered_item_ids_for_similarity)) if scores[i] >= 0]
         ranked_items.sort(key=lambda x: -x[1])
         
         # Take more candidates than needed to allow for artist exposure filtering

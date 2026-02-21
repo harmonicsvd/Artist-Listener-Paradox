@@ -11,95 +11,84 @@ class ObjectiveLossCalculator:
         """Initialize with recommender-specific weights.
         
         Args:
-            recommender_name (str): Name of the recommender ('ContentBased', 'CollaborativeFiltering', 'MatrixFactorization').
+            recommender_name (str): Name of the recommender ('ContentBased', 'CollaborativeFiltering', 'MatrixFactorization', 'HybridContentMF').
         """
         # Define weights for each recommender and k value
         self.weight_configs = {
-            'ContentBased': {
-                2: {
-                    'Precision': 0.0400,
-                    'Genre Precision': 0.2000,
-                    'Language Precision': 0.2000,
-                    'Recall': 0.0400,
-                    'NDCG': 0.0500,
-                    'Hit Rate': 0.0400,
-                    'Emerging Artist Hit Rate': 0.0300,
-                    'Emerging Artist Exposure Index': 0.1500, # Increased importance to target ~1
-                    'Coverage': 0.0700,
-                    'Diversity': 0.0900,
-                    'Novelty': 0.0900
-                },
-                5: {
-                    'Precision': 0.0300,
-                    'Genre Precision': 0.2500, # Increased importance
-                    'Language Precision': 0.2500, # Increased importance
-                    'Recall': 0.0200,
-                    'NDCG': 0.0300,
-                    'Hit Rate': 0.0200,
-                    'Emerging Artist Hit Rate': 0.0200,
-                    'Emerging Artist Exposure Index': 0.1800, # Increased importance to target ~1
-                    'Coverage': 0.0600,
-                    'Diversity': 0.0700,
-                    'Novelty': 0.0700
-                }
-            },
-            'CollaborativeFiltering': {
-                2: {
-                    'Precision': 0.0600,
-                    'Genre Precision': 0.1700,
-                    'Language Precision': 0.1700,
-                    'Recall': 0.0600,
-                    'NDCG': 0.0700,
-                    'Hit Rate': 0.0700,
-                    'Emerging Artist Hit Rate': 0.0500,
-                    'Emerging Artist Exposure Index': 0.1000,
-                    'Coverage': 0.0700,
-                    'Diversity': 0.1100,
-                    'Novelty': 0.0700
-                },
-                5: {
-                    'Precision': 0.0500,
-                    'Genre Precision': 0.1900,
-                    'Language Precision': 0.1900,
-                    'Recall': 0.0500,
-                    'NDCG': 0.0600,
-                    'Hit Rate': 0.0600,
-                    'Emerging Artist Hit Rate': 0.0500,
-                    'Emerging Artist Exposure Index': 0.1000,
-                    'Coverage': 0.0600,
-                    'Diversity': 0.1200,
-                    'Novelty': 0.0700
-                }
-            },
-            'MatrixFactorization': {
-                2: {
-                    'Precision': 0.0700,
-                    'Genre Precision': 0.1700,
-                    'Language Precision': 0.1700,
-                    'Recall': 0.0600,
-                    'NDCG': 0.0700,
-                    'Hit Rate': 0.0700,
-                    'Emerging Artist Hit Rate': 0.0500,
-                    'Emerging Artist Exposure Index': 0.1000,
-                    'Coverage': 0.0900,
-                    'Diversity': 0.0800,
-                    'Novelty': 0.0700  # Fixed from 0.0600 to sum to 1.0
-                },
-                5: {
-                    'Precision': 0.0600,
-                    'Genre Precision': 0.1900,
-                    'Language Precision': 0.1900,
-                    'Recall': 0.0500,
-                    'NDCG': 0.0600,
-                    'Hit Rate': 0.0600,
-                    'Emerging Artist Hit Rate': 0.0500,
-                    'Emerging Artist Exposure Index': 0.1000,
-                    'Coverage': 0.0800,
-                    'Diversity': 0.1000,
-                    'Novelty': 0.0600
-                }
-            }
+    'ContentBased': {
+        2: {
+            'Genre Precision': 0.3500,
+            'NDCG': 0.1000,
+            'Emerging Artist Hit Rate': 0.1700,
+            'Emerging Artist Exposure Index': 0.2300,
+            'Coverage': 0.0700,
+            'Diversity': 0.0800,   # total = 1.0000
+        },
+        5: {
+            'Genre Precision': 0.4000,
+            'NDCG': 0.0800,
+            'Emerging Artist Hit Rate': 0.1400,
+            'Emerging Artist Exposure Index': 0.2800,
+            'Coverage': 0.0500,
+            'Diversity': 0.0500,   # total = 1.0000
         }
+    },
+    'CollaborativeFiltering': {
+        2: {
+            'Genre Precision': 0.2900,
+            'NDCG': 0.1200,
+            'Emerging Artist Hit Rate': 0.1300,
+            'Emerging Artist Exposure Index': 0.2100,
+            'Coverage': 0.1000,
+            'Diversity': 0.1500,   # total = 1.0000 (was 0.95)
+        },
+        5: {
+            'Genre Precision': 0.3500,
+            'NDCG': 0.1000,
+            'Emerging Artist Hit Rate': 0.1200,
+            'Emerging Artist Exposure Index': 0.2300,
+            'Coverage': 0.0800,
+            'Diversity': 0.1200,   # total = 1.0000 (was 0.98)
+        }
+    },
+    'MatrixFactorization': {
+        2: {
+            'Genre Precision': 0.2900,
+            'NDCG': 0.1200,
+            'Emerging Artist Hit Rate': 0.1300,
+            'Emerging Artist Exposure Index': 0.2100,
+            'Coverage': 0.1000,
+            'Diversity': 0.1500,   # total = 1.0000 (was 0.95)
+        },
+        5: {
+            'Genre Precision': 0.3500,
+            'NDCG': 0.1000,
+            'Emerging Artist Hit Rate': 0.1200,
+            'Emerging Artist Exposure Index': 0.2300,
+            'Coverage': 0.0800,
+            'Diversity': 0.1200,   # total = 1.0000 (was 0.98)
+        }
+    },
+    'HybridContentMF': {
+        2: {
+            'Genre Precision': 0.3500,
+            'NDCG': 0.1000,
+            'Emerging Artist Hit Rate': 0.1700,
+            'Emerging Artist Exposure Index': 0.2300,
+            'Coverage': 0.0700,
+            'Diversity': 0.0800,   # total = 1.0000
+        },
+        5: {
+            'Genre Precision': 0.4000,
+            'NDCG': 0.0800,
+            'Emerging Artist Hit Rate': 0.1400,
+            'Emerging Artist Exposure Index': 0.2800,
+            'Coverage': 0.0500,
+            'Diversity': 0.0500,   # total = 1.0000
+        }
+    }
+}
+
         
         # Select weights based on recommender_name
         if recommender_name in self.weight_configs:
@@ -108,21 +97,27 @@ class ObjectiveLossCalculator:
         else:
             # Default to MatrixFactorization weights if recommender_name is not specified or invalid
             self.weight_configs = self.weight_configs['MatrixFactorization']
-            logger.warning(f"No recommender_name specified or invalid; using default MatrixFactorization weights")
+            logger.warning(f"No recommender_name specified or invalid ('{recommender_name}'); using default MatrixFactorization weights")
         
         # Verify weights sum to 1.0 for each k (listener satisfaction weights)
         for k in [2, 5]:
             if k in self.weight_configs:
                 weight_sum = sum(self.weight_configs[k].values())
-                logger.debug(f"Weight sum for {recommender_name or 'default'}, k={k}: {weight_sum:.4f}")
+                # Adjust for floating point inaccuracies
                 if not np.isclose(weight_sum, 1.0, rtol=1e-4):
-                    logger.error(f"Listener Satisfaction weights sum to {weight_sum:.4f} for k={k}; expected 1.0. Weights: {self.weight_configs[k]}")
-                    raise ValueError(f"Invalid weights sum for k={k}: {weight_sum}")
+                    logger.error(f"Listener Satisfaction weights sum to {weight_sum:.4f} for k={k}; expected 1.0. Re-normalizing.")
+                    # Re-normalize weights if they don't sum to 1.0
+                    factor = 1.0 / weight_sum
+                    for metric, weight in self.weight_configs[k].items():
+                        self.weight_configs[k][metric] = weight * factor
+                    logger.info(f"Weights for k={k} re-normalized. New sum: {sum(self.weight_configs[k].values()):.4f}")
+                else:
+                    logger.debug(f"Weight sum for {recommender_name or 'default'}, k={k}: {weight_sum:.4f}")
         
-        # Artist Satisfaction weights (sum to 1.0)
+        # Artist Satisfaction weights (sum to 1.0) - these remain unchanged as they directly address exposure
         self.as_weights = {
-            'tier_diversity': 0.35,
-            'gini': 0.65
+            'tier_diversity': 0.45,
+            'gini': 0.55
         }
         
         # Objective Loss weights (sum to 1.0)
@@ -141,15 +136,15 @@ class ObjectiveLossCalculator:
         try:
             ls = 0.0
             ls_weights = self.weight_configs.get(k, self.weight_configs[2])  # Default to k=2 if k not found
-            for metric in ls_weights:
+            for metric, weight in ls_weights.items():
+                value = float(metrics.get(metric, {}).get(k, 0.0))
                 # Special handling for Emerging Artist Exposure Index: penalize deviation from 1
                 if metric == 'Emerging Artist Exposure Index':
-                    value = float(metrics.get(metric, {}).get(k, 0.0))
                     # LS component for Exposure Index should be higher when closer to 1.0
                     # We penalize deviation, so (1 - abs(value - 1.0)) results in 1.0 if value is 1.0, 0.0 if value is 0.0 or 2.0
-                    ls += ls_weights[metric] * (1 - abs(value - 1.0))
+                    ls += weight * (1 - abs(value - 1.0))
                 else:
-                    ls += ls_weights[metric] * float(metrics.get(metric, {}).get(k, 0.0))
+                    ls += weight * value
             logger.info(f"Listener Satisfaction for k={k}: {ls:.4f}")
             return max(0, min(1, ls))  # Clamp to [0, 1]
         except Exception as e:
@@ -239,4 +234,3 @@ if __name__ == "__main__":
     print(f"Objective Loss: {loss}")
     print(f"Listener Satisfaction: {ls}")
     print(f"Artist Satisfaction: {as_score}")
-

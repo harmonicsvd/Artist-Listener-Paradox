@@ -991,7 +991,7 @@ if __name__ == "__main__":
         'run_optimization': True,
         'load_optimized_weights': True,
         'max_users': 40000,
-        'k_values': [2,5],
+        'k_values': [5],
         'n_recs': 5,
         'min_interactions': 6,
         'verbose': False, # Set to False for cleaner logs, but user progress bar will remain

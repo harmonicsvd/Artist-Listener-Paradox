@@ -9,15 +9,10 @@ def calculate_language_weights(
     play_counts: List[float],
     song_to_language: Dict[str, str]
 ) -> Dict[str, float]:
-    """Calculate weights for languages based on user's listening history.
-    
-    Args:
-        item_ids: List of item IDs
-        play_counts: List of play counts
-        song_to_language: Mapping from song IDs to languages
-        
-    Returns:
-        Dictionary mapping languages to weights
+    """
+    Calculates the proportion of user's listening history per language.
+    This function's output is now primarily for analytical purposes or to determine a user's dominant language for filtering,
+    rather than being used as a direct multiplicative weight in item scoring.
     """
     language_counts = {}
     total_plays = sum(play_counts)
@@ -31,38 +26,21 @@ def calculate_language_weights(
             missing_languages += 1
     
     if missing_languages > 0:
-        logger.warning(f"Missing language for {missing_languages} songs")
+        logger.warning(f"Missing language for {missing_languages} songs when calculating language counts.")
     
-    language_weights = {}
+    language_proportions = {}
     if total_plays > 0:
-        total_weight = 0.0
         for language, count in language_counts.items():
-            weight = count / total_plays
-            language_weights[language] = max(0.2, 0.7 * np.log1p(2.0 * weight))
-            total_weight += language_weights[language]
-        
-        # Normalize to sum to 1.0
-        if total_weight > 0:
-            for language in language_weights:
-                language_weights[language] /= total_weight
+            language_proportions[language] = count / total_plays
     
-    return language_weights
+    return language_proportions
 
 def calculate_genre_weights(
     item_ids: List[str],
     play_counts: List[float],
     song_to_genres: Dict[str, List[str]]
 ) -> Dict[str, float]:
-    """Calculate weights for genres based on user's listening history.
-    
-    Args:
-        item_ids: List of item IDs
-        play_counts: List of play counts
-        song_to_genres: Mapping from song IDs to genre tags
-        
-    Returns:
-        Dictionary mapping genres to weights
-    """
+    """Calculate weights for genres based on user's listening history."""
     genre_counts = {}
     total_plays = sum(play_counts)
     missing_genres = 0
@@ -81,7 +59,7 @@ def calculate_genre_weights(
     
     if missing_genres > 0:
         logger.warning(f"Missing genres for {missing_genres} songs")
-    
+            
     genre_weights = {}
     if total_plays > 0:
         total_weight = 0.0
@@ -90,7 +68,7 @@ def calculate_genre_weights(
             genre_weights[genre] = max(0.2, 0.7 * np.log1p(2.0 * weight))
             total_weight += genre_weights[genre]
         
-        # Normalize to sum to 1.0
+        # Normalize weights to sum to 1.0
         if total_weight > 0:
             for genre in genre_weights:
                 genre_weights[genre] /= total_weight
@@ -104,13 +82,13 @@ def calculate_item_weights(
     song_to_fam: Dict[str, float],
     genre_weights: Dict[str, float],
     song_to_genres: Dict[str, List[str]],
-    song_to_language: Dict[str, str],
-    language_weights: Dict[str, float],
+    song_to_language: Dict[str, str], # Still passed for context, but not for direct weighting
+    language_weights: Dict[str, float], # This parameter is now effectively ignored for scoring
     tier_weights: Dict[str, float]
 ) -> float:
     weight = 1.0
 
-    # Tier weight (no amplification or penalties)
+    # Tier weight
     tier = song_to_tier.get(item_id, 'mid_tier')
     tier_weight = tier_weights.get(tier, 1.0)
     weight *= tier_weight
@@ -118,24 +96,40 @@ def calculate_item_weights(
     # Genre weight with similarity filter
     genres = song_to_genres.get(item_id, [])
     if genres:
-        genre_weight = sum(genre_weights.get(genre, 0.0) * (2.0 if i == 0 else 0.3) for i, genre in enumerate(genres))  # Adjusted from 2.0/0.1
-        genre_weight /= sum(2.0 if i == 0 else 0.3 for i in range(len(genres)))
-        # Penalize items with no genre overlap
-        item_genres = set(genres)
-        user_genres = set(genre_weights.keys())
-        if not item_genres.intersection(user_genres):
-            genre_weight *= 0.01
-        weight *= max(0.1, 1.0 + genre_weight)  # Kept floor at 0.1
-    else:
-        weight *= 0.1  # Penalize items with no genres
+        genre_score_sum = 0.0
+        total_genre_contribution = 0.0
+        for i, genre in enumerate(genres):
+            user_preference_for_genre = genre_weights.get(genre, 0.0)
+            contribution_factor = 2.0 if i == 0 else 0.3 
+            genre_score_sum += user_preference_for_genre * contribution_factor
+            total_genre_contribution += contribution_factor
+        
+        if total_genre_contribution > 0:
+            genre_weight = genre_score_sum / total_genre_contribution
+        else:
+            genre_weight = 0.0
 
-    # Language weight
-    language = song_to_language.get(item_id)
-    if language and language in language_weights:
-        weight *= max(0.5, 1.0 + 2.0 * language_weights[language])
+        item_genres_set = set(genres)
+        user_preferred_genres_set = set(genre_weights.keys())
+        if not item_genres_set.intersection(user_preferred_genres_set):
+            genre_weight *= 0.01 
+        
+        weight *= max(0.1, 1.0 + genre_weight) 
     else:
-        weight *= 0.2  # Penalize unknown languages
+        weight *= 0.8 # Penalty for items without genre info
 
-    # Cap weight
-    weight = min(weight, 3.0)
-    return max(0.1, weight)
+    # Language weight is now handled by direct filtering in the recommender's `recommend` method.
+    # Therefore, we explicitly remove its influence from `calculate_item_weights`.
+    # The `language_weights` parameter is accepted for compatibility but its value is not used.
+    # No code here to multiply `weight` by `language_weights`.
+
+    # Popularity and Familiarity weights
+    pop_score = song_to_pop.get(item_id, 0.0)
+    fam_score = song_to_fam.get(item_id, 0.0)
+
+    # Apply a gentle boost for higher popularity/familiarity, but not too much to avoid bias
+    weight *= (1.0 + pop_score * 0.5 + fam_score * 0.5) 
+
+    # Cap weight (optional, but good for stability)
+    weight = min(weight, 3.0) # Example cap
+    return max(0.1, weight) # Ensure a minimum overall weight

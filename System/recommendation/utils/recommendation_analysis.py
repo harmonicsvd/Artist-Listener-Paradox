@@ -57,19 +57,18 @@ def compare_recommendation_approaches(
     system,
     user_id: str,
     seed_item_id: str,
-    recommender_name: str,
+    recommender, # This is still the recommender object
     n: int = 10,
     user_item_recs: Optional[pd.DataFrame] = None,
     user_profile: Optional[Dict[str, Any]] = None,
     testing_mode: bool = True,
     suppress_language_distribution: bool = False
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    from System.recommendation.recommendation_system import RecommendationSystem
     
-    logger.info("Comparing recommendation approaches for user %s and seed %s", user_id, seed_item_id)
+    logger.info("Comparing recommendation approaches for user %s and seed %s using %s", user_id, seed_item_id, recommender.name)
     print(f"\n=== RECOMMENDATION APPROACH COMPARISON ===")
-    print(f"User ID: {user_id}, Recommender: {recommender_name}")
-    
+    print(f"User ID: {user_id}, Recommender: {recommender.name}") # Use recommender.name
+
     seed_song_info = system.data_manager.song_loader.get_song_metadata()
     seed_song_info = seed_song_info[seed_song_info['song_id'] == seed_item_id]
     if not seed_song_info.empty:
@@ -85,7 +84,7 @@ def compare_recommendation_approaches(
         print("\n1. GENERATING USER-BASED RECOMMENDATIONS")
         user_item_recs, user_profile = system.get_recommendations(
             user_id=user_id,
-            recommender_name=recommender_name,
+            recommender_name=recommender.name,
             n=n,
             include_user_profile=True,
             verbose=True,
@@ -100,9 +99,10 @@ def compare_recommendation_approaches(
     print("\n2. GENERATING ITEM-BASED RECOMMENDATIONS")
     item_item_recs = system.get_similar_items(
         seed_item_id=seed_item_id,
-        recommender_name=recommender_name,
+        recommender_name=recommender.name,
         n=n,
-        verbose=True
+        verbose=True,
+        # Removed user_id as it's not expected by system.get_similar_items
     )
     
     if testing_mode:
@@ -165,3 +165,4 @@ def compare_recommendation_approaches(
     
     logger.info("Recommendation comparison complete")
     return user_item_recs, item_item_recs
+

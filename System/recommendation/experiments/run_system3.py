@@ -860,7 +860,7 @@ def execute_recommendation_comparison(config, shared_data, best_weights_per_reco
                 system=shared_data['system'],
                 user_id=sample_user_id,
                 seed_item_id=sample_song_id,
-                recommender_name=recommender_name,
+                recommender_name=recommender,
                 n=config['n_recs'],
                 testing_mode=config['verbose']
             )
@@ -991,7 +991,7 @@ if __name__ == "__main__":
         'run_optimization': True,
         'load_optimized_weights': True,
         'max_users': 40000,
-        'k_values': [2,5],
+        'k_values': [5],
         'n_recs': 5,
         'min_interactions': 6,
         'verbose': False, # Set to False for cleaner logs, but user progress bar will remain
@@ -1006,7 +1006,7 @@ if __name__ == "__main__":
         },
         'optimization_method': 'bayesian',
         'weight_options': [0.1, 0.15, 0.2],
-        'n_trials': 100,
+        'n_trials': 200,
         'loss_calculators': {
         'ContentBased': ObjectiveLossCalculator(recommender_name='ContentBased'),
         'CollaborativeFiltering': ObjectiveLossCalculator(recommender_name='CollaborativeFiltering'),

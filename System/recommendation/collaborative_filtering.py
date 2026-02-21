@@ -5,10 +5,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 from typing import Dict, Optional, List, Set
 import logging
 import os
-import pickle # Added for serializing mappings and matrices
+import pickle
 
 from System.recommendation.base import RecommenderBase
-from System.recommendation.utils.weights import calculate_item_weights, calculate_language_weights, calculate_genre_weights
+from System.recommendation.utils.weights import calculate_item_weights, calculate_genre_weights # Removed calculate_language_weights
 from System.recommendation.utils.mappings import create_song_to_tier_mapping, create_genre_mapping, create_language_mapping, create_artist_metric_mappings, compute_related_genres
 from tqdm import tqdm
 
@@ -45,7 +45,7 @@ class CollaborativeFilteringRecommender(RecommenderBase):
         self.song_to_artist = song_to_artist
         self.item_features = None 
         self.feature_weights = feature_weights or {
-            'similarity_component': 1.7, 
+            'similarity_component': 3.7, 
             'item_weight_component': 2.5 
         }
         self.item_weight_range_min = 0.0 
@@ -61,8 +61,8 @@ class CollaborativeFilteringRecommender(RecommenderBase):
 
     def _build_all_user_profiles_for_cf(self, user_interactions: pd.DataFrame) -> Dict[str, Dict]:
         """
-        Builds user profiles (language/genre weights, listened items) for all users
-        during CF training.
+        Builds user profiles (genre weights, listened items) for all users
+        during CF training. Language weights are no longer calculated here.
         """
         all_user_profiles = {}
         unique_users = user_interactions['user_id'].unique()
@@ -79,13 +79,13 @@ class CollaborativeFilteringRecommender(RecommenderBase):
             play_counts_listened = user_items.get('play_count', pd.Series([1.0] * len(item_ids_listened))).tolist()
 
             # Ensure essential mappings are available before calculating weights
-            if not all([self.song_to_language, self.song_to_genres, self.related_genres_map]):
-                logger.warning(f"Essential mappings not fully initialized for user {user_id} profile. Skipping weight calculation for this user.")
+            if not all([self.song_to_genres, self.related_genres_map]): # Removed self.song_to_language
+                logger.warning(f"Essential mappings not fully initialized for user {user_id} profile. Skipping genre weight calculation for this user.")
                 # Create a basic profile without weights if mappings are missing
-                all_user_profiles[user_id] = {'listened_items': set(item_ids_listened), 'language_weights': {}, 'genre_weights': {}}
+                all_user_profiles[user_id] = {'listened_items': set(item_ids_listened), 'genre_weights': {}}
                 continue
 
-            language_weights = calculate_language_weights(item_ids_listened, play_counts_listened, self.song_to_language)
+            # language_weights removed
             genre_weights = calculate_genre_weights(item_ids_listened, play_counts_listened, self.song_to_genres)
             
             user_genres = {genre for item_id in item_ids_listened for genre in self.song_to_genres.get(item_id, [])}
@@ -93,7 +93,6 @@ class CollaborativeFilteringRecommender(RecommenderBase):
             extended_genres = user_genres.union(related_genres)
             
             all_user_profiles[user_id] = {
-                'language_weights': language_weights,
                 'genre_weights': genre_weights,
                 'listened_items': set(item_ids_listened)
             }
@@ -134,7 +133,11 @@ class CollaborativeFilteringRecommender(RecommenderBase):
                 logger.info("Computed related genres for %d genres", len(self.related_genres_map))
             elif self.related_genres_map is None:
                 logger.warning("Cannot compute related_genres_map: song_to_genres is not set.")
-        
+            
+            # Ensure song_to_language is populated during train
+            if self.song_to_language is None and 'language' in song_metadata.columns:
+                self.song_to_language = dict(zip(song_metadata['song_id'], song_metadata['language']))
+
         if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, 
                     self.song_to_genres, self.song_to_language, self.related_genres_map]):
             logger.error("CollaborativeFiltering requires essential mappings; missing mappings may cause recommendation errors.")
@@ -220,7 +223,7 @@ class CollaborativeFilteringRecommender(RecommenderBase):
         logger.info("User-item matrix shape: %s, computed %d user similarities, %d item similarities.", 
                     self.user_item_matrix.shape, len(unique_users), len(unique_songs))
 
-        # Build user profiles (genre/language weights, listened items) here during train
+        # Build user profiles (genre weights, listened items) here during train
         self.user_profiles = self._build_all_user_profiles_for_cf(user_interactions)
         logger.debug(f"After CollaborativeFiltering train, user_profiles has {len(self.user_profiles)} entries.")
 
@@ -279,11 +282,11 @@ class CollaborativeFilteringRecommender(RecommenderBase):
             item_ids_listened = user_items['song_id'].tolist()
             play_counts_listened = user_items.get('play_count', pd.Series([1.0] * len(item_ids_listened))).tolist()
             
-            if not all([self.song_to_language, self.song_to_genres, self.related_genres_map]):
-                logger.error("Required mappings (song_to_language, song_to_genres, related_genres_map) not initialized for on-the-fly profile creation in CF recommend. Cannot proceed.")
+            if not all([self.song_to_genres, self.related_genres_map]): # Removed self.song_to_language
+                logger.error("Required mappings (song_to_genres, related_genres_map) not initialized for on-the-fly profile creation in CF recommend. Cannot proceed.")
                 return pd.DataFrame(columns=['user_id', 'song_id', 'score'])
 
-            language_weights = calculate_language_weights(item_ids_listened, play_counts_listened, self.song_to_language)
+            # language_weights removed
             genre_weights = calculate_genre_weights(item_ids_listened, play_counts_listened, self.song_to_genres)
             
             user_genres = {genre for item_id in item_ids_listened for genre in self.song_to_genres.get(item_id, [])}
@@ -291,7 +294,6 @@ class CollaborativeFilteringRecommender(RecommenderBase):
             extended_genres = user_genres.union(related_genres)
             
             user_profile = {
-                'language_weights': language_weights,
                 'genre_weights': genre_weights,
                 'listened_items': set(item_ids_listened)
             }
@@ -310,28 +312,68 @@ class CollaborativeFilteringRecommender(RecommenderBase):
         
         user_similarity_vector = self.user_similarities[user_idx].flatten()
         
-        # FIX: Removed .toarray() as matrix multiplication with dense vector results in dense array
-        raw_collaborative_scores = user_similarity_vector @ self.user_item_matrix 
-        
-        if raw_collaborative_scores.size == 0 or (raw_collaborative_scores.max() - raw_collaborative_scores.min()) < 1e-10:
-            logger.warning(f"Raw collaborative scores for user {user_id} are uniform or empty. Cannot normalize meaningfully.")
-            normalized_collaborative_scores = np.zeros_like(raw_collaborative_scores) 
+        # Calculate raw collaborative scores for ALL songs first
+        raw_collaborative_scores = user_similarity_vector @ self.user_item_matrix
+
+        # Determine dominant language(s) from user's listening history
+        user_listened_items = user_profile['listened_items']
+        dominant_languages = []
+        if user_listened_items and self.song_to_language:
+            listened_languages = [self.song_to_language.get(song_id) for song_id in user_listened_items if self.song_to_language.get(song_id)]
+            if listened_languages:
+                language_counts = pd.Series(listened_languages).value_counts()
+                max_count = language_counts.max()
+                dominant_languages = language_counts[language_counts == max_count].index.tolist()
+                if testing_mode:
+                    logger.info(f"User {user_id} dominant language(s): {dominant_languages}")
+            else:
+                logger.debug(f"No language information found for listened songs of user {user_id}.")
         else:
-            normalized_collaborative_scores = (raw_collaborative_scores - raw_collaborative_scores.min()) / \
-                                              (raw_collaborative_scores.max() - raw_collaborative_scores.min() + 1e-10)
+            logger.debug(f"No listened items or song_to_language mapping for user {user_id}.")
+
+        # Prepare a list of candidate song_ids and their original indices
+        candidate_song_ids = []
+        candidate_original_indices = []
+
+        if dominant_languages:
+            for i in range(len(self.index_to_song_id)):
+                song_id = self.index_to_song_id[i]
+                if self.song_to_language and self.song_to_language.get(song_id) in dominant_languages:
+                    candidate_song_ids.append(song_id)
+                    candidate_original_indices.append(i)
+            
+            if not candidate_song_ids: # Fallback if no songs match dominant language
+                logger.warning(f"No songs found matching dominant language(s) {dominant_languages}. Reverting to all songs for recommendation calculation.")
+                candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+                candidate_original_indices = list(range(len(self.index_to_song_id)))
+        else:
+            # If no dominant language found, consider all songs
+            candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+            candidate_original_indices = list(range(len(self.index_to_song_id)))
+
+        # Extract collaborative scores only for the candidate songs
+        collaborative_scores_for_candidates = raw_collaborative_scores[candidate_original_indices]
+
+        if collaborative_scores_for_candidates.size == 0 or (collaborative_scores_for_candidates.max() - collaborative_scores_for_candidates.min()) < 1e-10:
+            logger.warning(f"Collaborative scores for user {user_id} (filtered by language) are uniform or empty. Cannot normalize meaningfully. Returning empty recommendations.")
+            return pd.DataFrame(columns=['user_id', 'song_id', 'score'])
+        
+        # Normalize collaborative scores for candidates
+        normalized_collaborative_scores = (collaborative_scores_for_candidates - collaborative_scores_for_candidates.min()) / \
+                                          (collaborative_scores_for_candidates.max() - collaborative_scores_for_candidates.min() + 1e-10)
         
         scores = []
         listened_songs_indices = {self.song_id_to_index[sid] for sid in user_profile['listened_items'] if sid in self.song_id_to_index}
         
-        for idx in range(len(self.index_to_song_id)):
-            song_id = self.index_to_song_id[idx]
-            if exclude_listened and idx in listened_songs_indices:
+        for idx_in_candidate, song_id in enumerate(candidate_song_ids): # Iterate over candidate song_ids
+            original_idx = self.song_id_to_index[song_id] # Get original index for exclusion check
+            if exclude_listened and original_idx in listened_songs_indices:
                 scores.append(-1.0) 
                 continue
             
-            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.song_to_language, self.tier_weights]):
+            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.tier_weights]):
                 logger.warning(f"Required mappings missing for item {song_id} to calculate item weights. Skipping item weighting and using only collaborative score.")
-                scores.append(normalized_collaborative_scores[idx] * self.feature_weights['similarity_component'])
+                scores.append(normalized_collaborative_scores[idx_in_candidate] * self.feature_weights['similarity_component'])
                 continue
 
             item_weight = calculate_item_weights(
@@ -341,8 +383,7 @@ class CollaborativeFilteringRecommender(RecommenderBase):
                 self.song_to_fam,
                 user_profile['genre_weights'],
                 self.song_to_genres,
-                self.song_to_language,
-                user_profile['language_weights'],
+                None, None, # Language weights are no longer passed here
                 self.tier_weights
             )
             
@@ -360,7 +401,7 @@ class CollaborativeFilteringRecommender(RecommenderBase):
                                          (self.item_weight_range_max - self.item_weight_range_min)
             
             final_score = (
-                normalized_collaborative_scores[idx] * self.feature_weights['similarity_component'] +
+                normalized_collaborative_scores[idx_in_candidate] * self.feature_weights['similarity_component'] +
                 normalized_item_weight * self.feature_weights['item_weight_component']
             )
             scores.append(final_score)
@@ -376,20 +417,20 @@ class CollaborativeFilteringRecommender(RecommenderBase):
         
         scores[valid_scores_mask] = (valid_scores - valid_scores.min()) / (valid_scores.max() - valid_scores.min() + 1e-10)
         
-        ranked_song_indices = np.argsort(-scores) 
+        ranked_song_indices_in_scores = np.argsort(-scores) # These are indices within the `scores` array (which corresponds to `candidate_song_ids`)
         
         top_n_songs_info = []
         top_candidate_count = max(n * 5, 20) 
 
-        for i in ranked_song_indices:
-            song_id = self.index_to_song_id[i]
-            if scores[i] < 0: 
+        for i_in_scores in ranked_song_indices_in_scores:
+            song_id = candidate_song_ids[i_in_scores] # Get actual song_id from the candidate list
+            if scores[i_in_scores] < 0: 
                 continue
             
             top_n_songs_info.append({
                 'user_id': user_id,
                 'song_id': song_id,
-                'score': scores[i]
+                'score': scores[i_in_scores]
             })
             if len(top_n_songs_info) >= top_candidate_count:
                 break
@@ -477,14 +518,64 @@ class CollaborativeFilteringRecommender(RecommenderBase):
             logger.warning(f"Seed item {seed_item_id} not found in trained matrix; returning empty recommendations.")
             return pd.DataFrame(columns=['seed_item_id', 'song_id', 'score'])
         
-        item_similarity_vector = self.item_similarities[seed_idx].flatten()
+        # Calculate item similarity vector for ALL songs first
+        original_item_similarity_vector = self.item_similarities[seed_idx].flatten()
+
+        # Determine target language(s) for similar items
+        target_languages = []
+        user_listened_items = set()
+
+        if user_id and self.song_to_language:
+            # Get user's listened items to determine dominant language
+            user_profile = self.user_profiles.get(user_id)
+            if user_profile and 'listened_items' in user_profile:
+                user_listened_items = user_profile['listened_items']
+            
+            if user_listened_items:
+                listened_languages = [self.song_to_language.get(song_id) for song_id in user_listened_items if self.song_to_language.get(song_id)]
+                if listened_languages:
+                    language_counts = pd.Series(listened_languages).value_counts()
+                    max_count = language_counts.max()
+                    target_languages = language_counts[language_counts == max_count].index.tolist()
+                    if testing_mode:
+                        logger.info(f"User {user_id} dominant language(s) for similar items: {target_languages}")
         
-        if item_similarity_vector.size == 0 or (item_similarity_vector.max() - item_similarity_vector.min()) < 1e-10:
-            logger.warning(f"Item similarity vector for seed item {seed_item_id} is uniform or empty. Cannot normalize meaningfully.")
-            normalized_similarities = np.zeros_like(item_similarity_vector)
+        if not target_languages and self.song_to_language: # If no user or no dominant user language, use seed item's language
+            seed_language = self.song_to_language.get(seed_item_id)
+            if seed_language:
+                target_languages = [seed_language]
+                if testing_mode:
+                    logger.info(f"Using seed item's language {seed_language} for similar items.")
+            else:
+                logger.warning(f"No language found for seed item {seed_item_id}. Similar items will not be language filtered.")
+        
+        # Prepare a list of candidate song_ids and their original indices
+        candidate_song_ids = []
+        candidate_original_indices = []
+
+        if target_languages:
+            for i in range(len(self.index_to_song_id)):
+                song_id = self.index_to_song_id[i]
+                if self.song_to_language and self.song_to_language.get(song_id) in target_languages:
+                    candidate_song_ids.append(song_id)
+                    candidate_original_indices.append(i)
+            if not candidate_song_ids:
+                logger.warning(f"No similar items found matching target language(s) {target_languages}. Reverting to all songs for similarity calculation.")
+                candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+                candidate_original_indices = list(range(len(self.index_to_song_id)))
         else:
-            normalized_similarities = (item_similarity_vector - item_similarity_vector.min()) / \
-                                      (item_similarity_vector.max() - item_similarity_vector.min() + 1e-10)
+            candidate_song_ids = [self.index_to_song_id[i] for i in range(len(self.index_to_song_id))]
+            candidate_original_indices = list(range(len(self.index_to_song_id)))
+
+        # Extract similarities only for the candidate songs
+        item_similarity_vector_for_candidates = original_item_similarity_vector[candidate_original_indices]
+        
+        if item_similarity_vector_for_candidates.size == 0 or (item_similarity_vector_for_candidates.max() - item_similarity_vector_for_candidates.min()) < 1e-10:
+            logger.warning(f"Item similarity vector for seed item {seed_item_id} (filtered by language) is uniform or empty. Cannot normalize meaningfully.")
+            normalized_similarities = np.zeros_like(item_similarity_vector_for_candidates)
+        else:
+            normalized_similarities = (item_similarity_vector_for_candidates - item_similarity_vector_for_candidates.min()) / \
+                                      (item_similarity_vector_for_candidates.max() - item_similarity_vector_for_candidates.min() + 1e-10)
         
         scores = []
         user_profile = self.user_profiles.get(user_id) if user_id else None
@@ -501,16 +592,14 @@ class CollaborativeFilteringRecommender(RecommenderBase):
         if testing_mode:
             logger.debug(f"Extended genres size: {len(extended_genres)}")
             
-        for idx in range(len(self.index_to_song_id)):
-            song_id = self.index_to_song_id[idx]
-            
+        for idx_in_candidate, song_id in enumerate(candidate_song_ids): # Iterate over candidate song_ids
             if exclude_seed and song_id == seed_item_id:
                 scores.append(-1.0) 
                 continue
             
-            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.song_to_language, self.tier_weights]):
+            if not all([self.song_to_tier, self.song_to_pop, self.song_to_fam, self.song_to_genres, self.tier_weights]): # Removed self.song_to_language
                 logger.warning(f"Required mappings missing for item {song_id}. Skipping item weighting.")
-                scores.append(normalized_similarities[idx] * self.feature_weights['similarity_component'])
+                scores.append(normalized_similarities[idx_in_candidate] * self.feature_weights['similarity_component'])
                 continue
             
             item_weight = calculate_item_weights(
@@ -520,8 +609,7 @@ class CollaborativeFilteringRecommender(RecommenderBase):
                 self.song_to_fam,
                 user_profile['genre_weights'] if user_profile else {}, 
                 self.song_to_genres,
-                self.song_to_language,
-                user_profile['language_weights'] if user_profile else {}, 
+                None, None, # Language weights are no longer passed here
                 self.tier_weights
             )
             
@@ -539,7 +627,7 @@ class CollaborativeFilteringRecommender(RecommenderBase):
                                          (self.item_weight_range_max - self.item_weight_range_min)
             
             final_score = (
-                normalized_similarities[idx] * self.feature_weights['similarity_component'] +
+                normalized_similarities[idx_in_candidate] * self.feature_weights['similarity_component'] +
                 normalized_item_weight * self.feature_weights['item_weight_component']
             )
             scores.append(final_score)
@@ -554,20 +642,20 @@ class CollaborativeFilteringRecommender(RecommenderBase):
         
         scores[valid_scores_mask] = (valid_scores - valid_scores.min()) / (valid_scores.max() - valid_scores.min() + 1e-10)
         
-        ranked_song_indices = np.argsort(-scores) 
+        ranked_song_indices_in_scores = np.argsort(-scores) 
         
         top_n_songs_info = []
         top_candidate_count = max(n * 5, 20)
 
-        for i in ranked_song_indices:
-            song_id = self.index_to_song_id[i]
-            if scores[i] < 0:
+        for i_in_scores in ranked_song_indices_in_scores:
+            song_id = candidate_song_ids[i_in_scores] # Get actual song_id from the candidate list
+            if scores[i_in_scores] < 0:
                 continue
             
             top_n_songs_info.append({
                 'seed_item_id': seed_item_id,
                 'song_id': song_id,
-                'score': scores[i]
+                'score': scores[i_in_scores]
             })
             if len(top_n_songs_info) >= top_candidate_count:
                 break
