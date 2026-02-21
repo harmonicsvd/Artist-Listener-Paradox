@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Bytecode / cache
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Project artifacts (keep local only)
+System/SavedData*/
+System/SavedData2/
+System/TensorBoardLogs/
